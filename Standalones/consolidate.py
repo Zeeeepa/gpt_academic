@@ -283,14 +283,26 @@ class ImportProcessor:
                 i += 1
                 while i < len(lines):
                     next_line = lines[i]
-                    import_parts.append(next_line)
+                    next_stripped = next_line.strip()
                     
+                    # First, append the line and update state
+                    import_parts.append(next_line)
                     paren_depth += next_line.count('(') - next_line.count(')')
                     has_backslash = next_line.rstrip().endswith('\\')
                     
                     # Check if import is complete
                     if paren_depth <= 0 and not has_backslash:
                         break
+                    
+                    # CRITICAL: Check if NEXT line is a separate import statement
+                    # Look ahead to prevent merging separate consecutive imports
+                    if i + 1 < len(lines):
+                        peek_line = lines[i + 1].strip()
+                        if paren_depth == 0 and not has_backslash:
+                            if peek_line.startswith('from ') or peek_line.startswith('import '):
+                                # Next line is a separate import - stop here
+                                break
+                    
                     i += 1
                 
                 # Combine into single line
@@ -302,7 +314,8 @@ class ImportProcessor:
                 if 'import' in full_import:
                     # Extract the module and import parts
                     if full_import.startswith('from '):
-                        match = re.match(r'from\s+([\w.]+)\s+import\s+(.+)', full_import)
+                        # Use non-greedy match to avoid capturing subsequent imports
+                        match = re.match(r'from\s+([\w.]+)\s+import\s+(.+?)(?:\s+from\s+|\s+import\s+|$)', full_import)
                         if match:
                             module = match.group(1)
                             imports_part = match.group(2)
@@ -476,26 +489,48 @@ class ImportProcessor:
         docstring_quote = None
         in_multiline_string = False
         string_quote = None
+        indent_level = 0  # Track indentation to detect function/class bodies
         
         i = 0
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
             
+            # Update indent level based on line content
+            if stripped and not stripped.startswith('#'):
+                current_indent = len(line) - len(line.lstrip())
+                if current_indent > 0:
+                    indent_level = current_indent
+                elif stripped.startswith(('def ', 'class ', 'if ', 'for ', 'while ', 'with ', 'try:', 'except', 'finally:')):
+                    # Starting a new block
+                    pass
+                else:
+                    # Back to top level
+                    indent_level = 0
+            
             # Handle module docstrings (remove them)
+            # Only remove actual module docstrings, not strings assigned to variables
             if i < 10 and not skip_docstring and not in_multiline_string:  # Only check first 10 lines
                 if stripped.startswith('"""') or stripped.startswith("'''"):
-                    quote = '"""' if stripped.startswith('"""') else "'''"
-                    if stripped.count(quote) >= 2:
-                        # Single line docstring - skip it
-                        i += 1
-                        continue
-                    else:
-                        # Multi-line docstring start
-                        skip_docstring = True
-                        docstring_quote = quote
-                        i += 1
-                        continue
+                    # Check if previous line was an assignment (e.g., "variable = \")
+                    is_assignment = False
+                    if i > 0:
+                        prev_line = lines[i-1].strip()
+                        if prev_line.endswith('\\') or '=' in prev_line:
+                            is_assignment = True
+                    
+                    if not is_assignment:
+                        quote = '"""' if stripped.startswith('"""') else "'''"
+                        if stripped.count(quote) >= 2:
+                            # Single line docstring - skip it
+                            i += 1
+                            continue
+                        else:
+                            # Multi-line docstring start
+                            skip_docstring = True
+                            docstring_quote = quote
+                            i += 1
+                            continue
                         
             if skip_docstring:
                 if docstring_quote in line:
@@ -529,23 +564,29 @@ class ImportProcessor:
                 
             # Process import lines
             if stripped.startswith('import ') or stripped.startswith('from '):
-                import_stmt = self.parse_import_line(line)
-                
-                if import_stmt:
-                    if import_stmt.import_type == ImportType.LOCAL:
-                        # COMPLETELY REMOVE local imports - they're being inlined
-                        pass  # Don't add to processed_lines
+                # Only extract top-level imports (indent_level == 0)
+                # Imports inside functions/classes should be left in place
+                if indent_level == 0:
+                    import_stmt = self.parse_import_line(line)
+                    
+                    if import_stmt:
+                        if import_stmt.import_type == ImportType.LOCAL:
+                            # COMPLETELY REMOVE local imports - they're being inlined
+                            pass  # Don't add to processed_lines
+                        else:
+                            # Collect external/stdlib imports - will be consolidated at top
+                            file_imports.add(import_stmt)
+                            # Don't add to processed_lines - imports go to top
+                            # Will check for empty blocks later
                     else:
-                        # Collect external/stdlib imports - will be consolidated at top
-                        file_imports.add(import_stmt)
-                        # Don't add to processed_lines - imports go to top
-                        # Will check for empty blocks later
+                        # Couldn't parse or relative import
+                        if stripped.startswith('from .'):
+                            processed_lines.append(f'# {line}  # Relative import removed')
+                        else:
+                            processed_lines.append(line)
                 else:
-                    # Couldn't parse or relative import
-                    if stripped.startswith('from .'):
-                        processed_lines.append(f'# {line}  # Relative import removed')
-                    else:
-                        processed_lines.append(line)
+                    # Import inside a function/class - keep it
+                    processed_lines.append(line)
             else:
                 processed_lines.append(line)
                 
