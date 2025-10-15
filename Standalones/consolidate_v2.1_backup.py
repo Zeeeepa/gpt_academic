@@ -15,16 +15,9 @@ Consolidates a Python module/package into a single standalone file with:
 - Dry-run mode for safety
 - Automatic code formatting detection
 
-Version: 3.0 (Multiline Import Edition)
+Version: 2.1 (Enhanced Robustness Edition)
 Author: AI Assistant
 License: MIT
-
-Changelog v3.0:
-- ✅ Multiline parenthesized imports: from module import (item1, item2)
-- ✅ Backslash continuations: from module import \
-- ✅ Nested parentheses handling
-- ✅ Comment preservation in imports
-- ✅ Enhanced error recovery
 """
 
 import os
@@ -198,16 +191,6 @@ class ImportProcessor:
             ImportType.EXTERNAL: set(),
             ImportType.LOCAL: set(),
         }
-        # For intelligent merging: module -> set of imported names
-        self.from_imports: Dict[str, Dict[str, Set[str]]] = {
-            'STDLIB': {},
-            'EXTERNAL': {},
-        }
-        # For simple imports: module -> alias (if any)
-        self.simple_imports: Dict[str, Dict[str, Optional[str]]] = {
-            'STDLIB': {},
-            'EXTERNAL': {},
-        }
         
     def _get_stdlib_modules(self) -> Set[str]:
         """Get standard library module names."""
@@ -251,95 +234,12 @@ class ImportProcessor:
         }
         return stdlib
         
-    @staticmethod
-    def normalize_multiline_imports(content: str) -> str:
-        """
-        Normalize multiline imports into single lines.
-        
-        Handles:
-        - Parenthesized imports: from module import (a, b, c)
-        - Backslash continuations: from module import a, \\ b, c
-        - Nested parentheses
-        - Comments within imports
-        """
-        lines = content.split('\n')
-        normalized_lines = []
-        i = 0
-        
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-            
-            # Check if this is the start of a multiline import
-            if (stripped.startswith('import ') or stripped.startswith('from ')) and \
-               (stripped.endswith('(') or stripped.endswith('\\') or 
-                ('(' in stripped and ')' not in stripped)):
-                
-                # Accumulate the full import statement
-                import_parts = [line]
-                paren_depth = line.count('(') - line.count(')')
-                has_backslash = line.rstrip().endswith('\\')
-                
-                i += 1
-                while i < len(lines):
-                    next_line = lines[i]
-                    import_parts.append(next_line)
-                    
-                    paren_depth += next_line.count('(') - next_line.count(')')
-                    has_backslash = next_line.rstrip().endswith('\\')
-                    
-                    # Check if import is complete
-                    if paren_depth <= 0 and not has_backslash:
-                        break
-                    i += 1
-                
-                # Combine into single line
-                full_import = ' '.join(part.strip().rstrip('\\') for part in import_parts)
-                # Clean up multiple spaces
-                full_import = re.sub(r'\s+', ' ', full_import)
-                
-                # Remove ALL parentheses content and extract just the imports
-                if 'import' in full_import:
-                    # Extract the module and import parts
-                    if full_import.startswith('from '):
-                        match = re.match(r'from\s+([\w.]+)\s+import\s+(.+)', full_import)
-                        if match:
-                            module = match.group(1)
-                            imports_part = match.group(2)
-                            
-                            # Remove ALL parentheses (nested or not)
-                            imports_part = re.sub(r'[()]', '', imports_part)
-                            # Clean up spaces
-                            imports_part = re.sub(r'\s+', ' ', imports_part).strip()
-                            # Remove trailing commas
-                            imports_part = re.sub(r',\s*$', '', imports_part)
-                            
-                            full_import = f'from {module} import {imports_part}'
-                    else:
-                        # Simple import statement
-                        imports_part = full_import[7:].strip()  # Remove 'import '
-                        imports_part = re.sub(r'[()]', '', imports_part)
-                        imports_part = re.sub(r'\s+', ' ', imports_part).strip()
-                        full_import = f'import {imports_part}'
-                
-                normalized_lines.append(full_import)
-                i += 1
-            else:
-                normalized_lines.append(line)
-                i += 1
-        
-        return '\n'.join(normalized_lines)
-    
     def parse_import_line(self, line: str) -> Optional[ImportStatement]:
         """Parse a single import line into an ImportStatement."""
         stripped = line.strip()
         
         # Skip comments and empty lines
         if not stripped or stripped.startswith('#'):
-            return None
-        
-        # Skip template/placeholder imports (common patterns)
-        if '...' in stripped or 'import ...' in stripped:
             return None
             
         # Handle relative imports - skip for now
@@ -408,56 +308,20 @@ class ImportProcessor:
             
     def add_import(self, import_stmt: ImportStatement) -> bool:
         """
-        Add an import to the appropriate category with intelligent merging.
+        Add an import to the appropriate category.
         Returns True if added, False if duplicate.
         """
-        if import_stmt.import_type == ImportType.LOCAL:
-            return False  # Skip local imports
-            
-        raw = import_stmt.raw_statement.strip()
-        import_type_key = 'STDLIB' if import_stmt.import_type == ImportType.STDLIB else 'EXTERNAL'
+        normalized = import_stmt.raw_statement.strip()
         
-        # Parse the import statement
-        if raw.startswith('from '):
-            # Parse: from module import name1, name2 as alias2, ...
-            match = re.match(r'from\s+([\w.]+)\s+import\s+(.+)', raw)
-            if match:
-                module = match.group(1)
-                imports_str = match.group(2)
-                
-                # Parse individual imports
-                if module not in self.from_imports[import_type_key]:
-                    self.from_imports[import_type_key][module] = set()
-                
-                # Split by comma and handle aliases
-                for item in imports_str.split(','):
-                    item = item.strip()
-                    if ' as ' in item:
-                        name, alias = item.split(' as ')
-                        self.from_imports[import_type_key][module].add(f"{name.strip()} as {alias.strip()}")
-                    else:
-                        self.from_imports[import_type_key][module].add(item)
-                        
-                return True
-                
-        elif raw.startswith('import '):
-            # Parse: import module1, module2 as alias2, ...
-            imports_str = raw[7:].strip()  # Remove 'import '
+        if normalized in self.seen_imports:
+            return False
             
-            for item in imports_str.split(','):
-                item = item.strip()
-                if ' as ' in item:
-                    module, alias = item.split(' as ')
-                    module = module.strip()
-                    alias = alias.strip()
-                    self.simple_imports[import_type_key][module] = alias
-                else:
-                    if item not in self.simple_imports[import_type_key]:
-                        self.simple_imports[import_type_key][item] = None
-                        
-            return True
+        self.seen_imports.add(normalized)
+        
+        if import_stmt.import_type != ImportType.LOCAL:
+            self.categorized_imports[import_stmt.import_type].add(import_stmt)
             
-        return False
+        return True
         
     def process_file_imports(self, content: str) -> Tuple[str, Set[ImportStatement]]:
         """
@@ -466,16 +330,12 @@ class ImportProcessor:
         Returns:
             (content_without_imports, set_of_external_imports)
         """
-        # First, normalize multiline imports
-        content = self.normalize_multiline_imports(content)
         lines = content.split('\n')
         processed_lines = []
         file_imports = set()
         
         skip_docstring = False
         docstring_quote = None
-        in_multiline_string = False
-        string_quote = None
         
         i = 0
         while i < len(lines):
@@ -483,7 +343,7 @@ class ImportProcessor:
             stripped = line.strip()
             
             # Handle module docstrings (remove them)
-            if i < 10 and not skip_docstring and not in_multiline_string:  # Only check first 10 lines
+            if i < 10 and not skip_docstring:  # Only check first 10 lines
                 if stripped.startswith('"""') or stripped.startswith("'''"):
                     quote = '"""' if stripped.startswith('"""') else "'''"
                     if stripped.count(quote) >= 2:
@@ -503,29 +363,6 @@ class ImportProcessor:
                     docstring_quote = None
                 i += 1
                 continue
-            
-            # Track multiline strings (templates, etc.)
-            if not in_multiline_string:
-                # Check for start of multiline string
-                for quote in ['"""', "'''"]:
-                    if quote in line:
-                        # Count occurrences
-                        count = line.count(quote)
-                        if count == 1:
-                            # Start of multiline string
-                            in_multiline_string = True
-                            string_quote = quote
-                            break
-                        # If count >= 2, it's complete on one line
-            else:
-                # We're inside a multiline string, check for end
-                if string_quote in line:
-                    in_multiline_string = False
-                    string_quote = None
-                # Skip processing this line as it's part of a string
-                processed_lines.append(line)
-                i += 1
-                continue
                 
             # Process import lines
             if stripped.startswith('import ') or stripped.startswith('from '):
@@ -533,13 +370,12 @@ class ImportProcessor:
                 
                 if import_stmt:
                     if import_stmt.import_type == ImportType.LOCAL:
-                        # COMPLETELY REMOVE local imports - they're being inlined
-                        pass  # Don't add to processed_lines
+                        # Comment out local imports
+                        processed_lines.append(f'# {line}  # Local import removed')
                     else:
-                        # Collect external/stdlib imports - will be consolidated at top
+                        # Collect external/stdlib imports
                         file_imports.add(import_stmt)
-                        # Don't add to processed_lines - imports go to top
-                        # Will check for empty blocks later
+                        # Don't add to output - we'll consolidate at top
                 else:
                     # Couldn't parse or relative import
                     if stripped.startswith('from .'):
@@ -550,89 +386,6 @@ class ImportProcessor:
                 processed_lines.append(line)
                 
             i += 1
-        
-        # Post-process: Fix ONLY truly empty blocks (try/except/else/elif/finally/with)
-        # Be VERY conservative - only fix blocks that are DEFINITELY problems
-        final_lines = []
-        i = 0
-        while i < len(processed_lines):
-            line = processed_lines[i]
-            final_lines.append(line)
-            stripped = line.strip()
-            
-            # ONLY handle these specific keywords that MUST have a body
-            keywords_needing_body = ['try:', 'except:', 'except ', 'else:', 'elif ', 'finally:', 'with ', 'if ', 'for ', 'while ']
-            is_special_block = any(stripped.startswith(kw) or stripped == kw.rstrip() for kw in keywords_needing_body)
-            
-            # Check if line ends with : (ignoring trailing comments)
-            line_without_comment = line.split('#')[0].rstrip()
-            if not is_special_block or not line_without_comment.endswith(':'):
-                i += 1
-                continue
-            
-            # Calculate indentation
-            current_indent = len(line) - len(line.lstrip())
-            
-            # Skip if this looks like a generator/comprehension within a call (ends with ):)
-            # But NOT if it's a normal if/for/while statement that happens to have a call
-            # Pattern: "for x in ...):" is a comprehension, "if foo()):" is a normal if with function call
-            if line_without_comment.endswith('):'):
-                # Check if this is really a comprehension or just a function call
-                # Heuristic: if previous line has unclosed paren/bracket, this is a continuation
-                if i > 0:
-                    prev_line = processed_lines[i - 1]
-                    prev_stripped = prev_line.split('#')[0].rstrip()
-                    prev_indent = len(prev_line) - len(prev_line.lstrip())
-                    
-                    # Count open/close parens and brackets on previous line
-                    open_count = prev_stripped.count('(') + prev_stripped.count('[') + prev_stripped.count('{')
-                    close_count = prev_stripped.count(')') + prev_stripped.count(']') + prev_stripped.count('}')
-                    
-                    # If previous line has unclosed brackets AND this line is more indented, it's a continuation
-                    if open_count > close_count and current_indent > prev_indent:
-                        # This is a continuation line (comprehension/generator)
-                        i += 1
-                        continue
-            
-            # Look ahead for body
-            next_idx = i + 1
-            has_body = False
-            
-            while next_idx < len(processed_lines):
-                next_line = processed_lines[next_idx]
-                next_stripped = next_line.strip()
-                
-                # Skip empty lines
-                if not next_stripped:
-                    next_idx += 1
-                    continue
-                
-                # Skip comments (but they don't count as body!)
-                if next_stripped.startswith('#'):
-                    next_idx += 1
-                    continue
-                
-                # Check indentation of next real line
-                next_indent = len(next_line) - len(next_line.lstrip())
-                
-                # If we find except/else/elif/finally at SAME level, the try/if block is empty
-                same_level_keywords = ['except:', 'except ', 'else:', 'elif ', 'finally:']
-                if next_indent == current_indent and any(next_stripped.startswith(kw) for kw in same_level_keywords):
-                    # Empty block followed by continuation (except/else/elif/finally)
-                    has_body = False
-                    break
-                
-                # If next line is indented more, we have a body
-                if next_indent > current_indent:
-                    has_body = True
-                break
-            
-            if not has_body:
-                final_lines.append(' ' * (current_indent + 4) + 'pass  # Empty block')
-            
-            i += 1
-        
-        processed_lines = final_lines
             
         # Clean up excessive blank lines
         output = '\n'.join(processed_lines)
@@ -641,83 +394,34 @@ class ImportProcessor:
         return output, file_imports
         
     def get_consolidated_imports(self) -> str:
-        """Get all consolidated imports as formatted string with intelligent merging."""
+        """Get all consolidated imports as formatted string."""
         output = []
-        written_simple = set()  # Track written simple imports across all categories
-        written_from = {}  # Track written from imports: {module: set(names)}
         
-        # Helper to format a category
-        def format_category(category_key: str, category_name: str):
-            lines = []
-            
-            # Simple imports first
-            simple = self.simple_imports[category_key]
-            if simple:
-                lines.append(f'# {category_name}')
-                lines.append('# ============================================================================')
-                for module in sorted(simple.keys()):
-                    # Skip if already written in a previous category (e.g., stdlib takes precedence)
-                    if module in written_simple:
-                        continue
-                    written_simple.add(module)
-                    
-                    alias = simple[module]
-                    if alias:
-                        lines.append(f'import {module} as {alias}')
-                    else:
-                        lines.append(f'import {module}')
-                lines.append('')
-            
-            # From imports - grouped and merged
-            from_imps = self.from_imports[category_key]
-            if from_imps:
-                if not lines:  # Add header if not already added
-                    lines.append(f'# {category_name}')
-                    lines.append('# ============================================================================')
-                
-                for module in sorted(from_imps.keys()):
-                    items = sorted(from_imps[module])
-                    
-                    # Skip if these exact imports from this module were already written
-                    if module in written_from:
-                        # Check if all items already written
-                        if items <= written_from[module]:  # subset check
-                            continue
-                        # Merge new items with existing
-                        new_items = items - written_from[module]
-                        if not new_items:
-                            continue
-                        items = new_items
-                        written_from[module].update(items)
-                    else:
-                        written_from[module] = set(items)
-                    
-                    # Format nicely - if too long, use multi-line
-                    items_str = ', '.join(items)
-                    if len(f'from {module} import {items_str}') <= 88:  # PEP 8 line length
-                        lines.append(f'from {module} import {items_str}')
-                    else:
-                        # Multi-line format
-                        lines.append(f'from {module} import (')
-                        for i, item in enumerate(items):
-                            if i < len(items) - 1:
-                                lines.append(f'    {item},')
-                            else:
-                                lines.append(f'    {item}')
-                        lines.append(')')
-                lines.append('')
-            
-            return lines
+        # Standard library imports
+        stdlib_imports = sorted(
+            [imp.raw_statement for imp in self.categorized_imports[ImportType.STDLIB]],
+            key=lambda x: (not x.startswith('from '), x)  # 'import' before 'from'
+        )
         
-        # Standard library
-        stdlib_lines = format_category('STDLIB', 'Standard Library Imports')
-        if stdlib_lines:
-            output.extend(stdlib_lines)
+        if stdlib_imports:
+            output.append('# ============================================================================')
+            output.append('# Standard Library Imports')
+            output.append('# ============================================================================')
+            output.extend(stdlib_imports)
+            output.append('')
             
-        # External packages
-        external_lines = format_category('EXTERNAL', 'External Package Imports')
-        if external_lines:
-            output.extend(external_lines)
+        # External imports
+        external_imports = sorted(
+            [imp.raw_statement for imp in self.categorized_imports[ImportType.EXTERNAL]],
+            key=lambda x: (not x.startswith('from '), x)
+        )
+        
+        if external_imports:
+            output.append('# ============================================================================')
+            output.append('# External Package Imports')
+            output.append('# ============================================================================')
+            output.extend(external_imports)
+            output.append('')
             
         return '\n'.join(output)
 
@@ -874,17 +578,10 @@ class CodebaseConsolidator:
             base_module = module_name.split('.')[0]
             self.local_modules.add(base_module)
             
-        # CRITICAL: Also add the repository base name as a local module
-        # This handles imports like "from crazy_functions import X" when scanning crazy_functions/
-        repo_base_name = self.repo_path.name
-        self.local_modules.add(repo_base_name)
-        self.log(f"DEBUG: Added repo base name to local_modules: {repo_base_name}")
-            
         self.python_files = python_files
         self.stats['files_found'] = len(python_files)
         self.log(f"Found {len(python_files)} Python files")
         self.log(f"Detected {len(self.local_modules)} local module names")
-        self.log(f"DEBUG: Base modules in local_modules: {sorted([m for m in self.local_modules if '.' not in m])[:10]}")
         
         return python_files
         

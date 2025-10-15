@@ -1,0 +1,23 @@
+{
+  "timestamp": "2025-10-15T18:52:53.140830",
+  "errors": [
+    {
+      "time": 1760554373.1391592,
+      "type": "SyntaxError",
+      "message": "invalid syntax (<unknown>, line 165)",
+      "context": "syntax_validation",
+      "file": "TEST_CONSOLIDATED.py",
+      "traceback": "Traceback (most recent call last):\n  File \"/tmp/Zeeeepa/gpt_academic/Standalones/consolidate.py\", line 1090, in _validate_syntax\n    ast.parse(f.read())\n    ~~~~~~~~~^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/ast.py\", line 50, in parse\n    return compile(source, filename, mode, flags,\n                   _feature_version=feature_version, optimize=optimize)\n  File \"<unknown>\", line 165\n    (Settings,\n    ^\nSyntaxError: invalid syntax\n"
+    }
+  ],
+  "warnings": [],
+  "skipped_files": [],
+  "summary": {
+    "total_errors": 1,
+    "total_warnings": 0,
+    "total_skipped": 0,
+    "error_types": "{'SyntaxError'}",
+    "warnings": [],
+    "skipped_files": []
+  }
+}
