@@ -38,6 +38,7 @@ import argparse
 import shutil
 import json
 import hashlib
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional, Any
 from dataclasses import dataclass, field
@@ -55,6 +56,12 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Directory configuration for lint/format operations
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+BACKEND_DIR = "."
+LIBS_DIR = "../autogpt_libs"
+TARGET_DIRS = [BACKEND_DIR, LIBS_DIR]
 
 
 class ImportType(Enum):
@@ -1262,6 +1269,382 @@ For more information, see: https://github.com/yourusername/consolidate
     
     sys.exit(0 if success else 1)
 
-
 if __name__ == '__main__':
     main()
+
+# ============================================================================
+# Lint & Format Utilities (Poetry-based)
+# ============================================================================
+
+def run(*command: str) -> None:
+    """Execute a poetry run command with error handling."""
+    print(f">>>>> Running poetry run {' '.join(command)}")
+    try:
+        subprocess.run(
+            ["poetry", "run"] + list(command),
+            cwd=SCRIPT_DIR,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as e:
+        print(e.output.decode("utf-8"), file=sys.stderr)
+        raise
+
+
+def lint():
+    """Run linting checks on codebase."""
+    # Filter TARGET_DIRS to only existing paths
+    existing_dirs = [d for d in TARGET_DIRS if os.path.exists(os.path.join(SCRIPT_DIR, d))]
+    
+    if not existing_dirs:
+        logger.warning("No target directories found for linting")
+        return
+    
+    lint_step_args: list[list[str]] = [
+        ["ruff", "check", *existing_dirs, "--exit-zero"],
+        ["ruff", "format", "--diff", "--check", LIBS_DIR] if os.path.exists(os.path.join(SCRIPT_DIR, LIBS_DIR)) else None,
+        ["isort", "--diff", "--check", "--profile", "black", BACKEND_DIR],
+        ["black", "--diff", "--check", BACKEND_DIR],
+        ["pyright", *existing_dirs],
+    ]
+    
+    # Filter out None entries
+    lint_step_args = [args for args in lint_step_args if args is not None]
+    
+    lint_error = None
+    for args in lint_step_args:
+        try:
+            run(*args)
+        except subprocess.CalledProcessError as e:
+            lint_error = e
+
+    if lint_error:
+        print("Lint failed, try running `poetry run format` to fix the issues")
+        sys.exit(1)
+
+
+def format_code():
+    """Run code formatters on codebase."""
+    existing_dirs = [d for d in TARGET_DIRS if os.path.exists(os.path.join(SCRIPT_DIR, d))]
+    
+    if not existing_dirs:
+        logger.warning("No target directories found for formatting")
+        return
+        
+    run("ruff", "check", "--fix", *existing_dirs)
+    
+    if os.path.exists(os.path.join(SCRIPT_DIR, LIBS_DIR)):
+        run("ruff", "format", LIBS_DIR)
+        
+    run("isort", "--profile", "black", BACKEND_DIR)
+    run("black", BACKEND_DIR)
+    run("pyright", *existing_dirs)
+
+
+# ============================================================================
+# Argument Analysis Feature
+# ============================================================================
+
+class FunctionRequirementsAnalyzer(ast.NodeVisitor):
+    """AST visitor to extract function requirements."""
+    
+    def __init__(self, function_name: Optional[str] = None):
+        self.function_name = function_name
+        self.functions_found: Dict[str, Dict[str, Any]] = {}
+        self.current_function: Optional[str] = None
+        self.current_scope_vars: Set[str] = set()
+        self.global_imports: Set[str] = set()
+        
+    def visit_Import(self, node: ast.Import) -> None:
+        """Track imported modules."""
+        for alias in node.names:
+            self.global_imports.add(alias.name.split('.')[0])
+        self.generic_visit(node)
+        
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Track from-imports."""
+        if node.module:
+            self.global_imports.add(node.module.split('.')[0])
+        self.generic_visit(node)
+    
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Extract function signature and analyze body."""
+        # Skip if we're looking for specific function and this isn't it
+        if self.function_name and node.name != self.function_name:
+            return
+            
+        func_info = {
+            'name': node.name,
+            'parameters': self._extract_parameters(node.args),
+            'return_annotation': ast.unparse(node.returns) if node.returns else None,
+            'decorators': [ast.unparse(d) for d in node.decorator_list],
+            'free_variables': set(),
+            'env_vars': set(),
+            'calls': set(),
+        }
+        
+        # Analyze function body
+        self.current_function = node.name
+        self.current_scope_vars = set(arg.arg for arg in node.args.args)
+        self.current_scope_vars.update(arg.arg for arg in node.args.posonlyargs)
+        self.current_scope_vars.update(arg.arg for arg in node.args.kwonlyargs)
+        if node.args.vararg:
+            self.current_scope_vars.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.current_scope_vars.add(node.args.kwarg.arg)
+            
+        # Visit body to find free variables
+        for stmt in node.body:
+            self._analyze_node_for_vars(stmt, func_info)
+            
+        self.functions_found[node.name] = func_info
+        self.current_function = None
+        self.current_scope_vars = set()
+        
+    def _extract_parameters(self, args: ast.arguments) -> Dict[str, Any]:
+        """Extract detailed parameter information."""
+        params = {
+            'positional': [],
+            'positional_only': [],
+            'keyword_only': [],
+            'var_positional': None,
+            'var_keyword': None,
+            'defaults': {}
+        }
+        
+        # Positional-only (Python 3.8+)
+        for arg in args.posonlyargs:
+            param_info = {
+                'name': arg.arg,
+                'annotation': ast.unparse(arg.annotation) if arg.annotation else None
+            }
+            params['positional_only'].append(param_info)
+        
+        # Regular positional/keyword
+        for arg in args.args:
+            param_info = {
+                'name': arg.arg,
+                'annotation': ast.unparse(arg.annotation) if arg.annotation else None
+            }
+            params['positional'].append(param_info)
+            
+        # Defaults for positional args
+        if args.defaults:
+            default_offset = len(args.args) - len(args.defaults)
+            for i, default in enumerate(args.defaults):
+                param_name = args.args[default_offset + i].arg
+                params['defaults'][param_name] = ast.unparse(default)
+        
+        # *args
+        if args.vararg:
+            params['var_positional'] = {
+                'name': args.vararg.arg,
+                'annotation': ast.unparse(args.vararg.annotation) if args.vararg.annotation else None
+            }
+        
+        # Keyword-only
+        for arg in args.kwonlyargs:
+            param_info = {
+                'name': arg.arg,
+                'annotation': ast.unparse(arg.annotation) if arg.annotation else None
+            }
+            params['keyword_only'].append(param_info)
+            
+        # Defaults for keyword-only
+        for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+            if default:
+                params['defaults'][arg.arg] = ast.unparse(default)
+        
+        # **kwargs
+        if args.kwarg:
+            params['var_keyword'] = {
+                'name': args.kwarg.arg,
+                'annotation': ast.unparse(args.kwarg.annotation) if args.kwarg.annotation else None
+            }
+            
+        return params
+    
+    def _analyze_node_for_vars(self, node: ast.AST, func_info: Dict[str, Any]) -> None:
+        """Recursively analyze node for free variables and env access."""
+        # Check for environment variable access
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Attribute):
+                if (isinstance(node.value.value, ast.Name) and 
+                    node.value.value.id == 'os' and 
+                    node.value.attr == 'environ'):
+                    if isinstance(node.slice, ast.Constant):
+                        func_info['env_vars'].add(node.slice.value)
+        
+        # Check for os.getenv calls
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                if (isinstance(node.func.value, ast.Name) and 
+                    node.func.value.id == 'os' and 
+                    node.func.attr == 'getenv'):
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        func_info['env_vars'].add(node.args[0].value)
+            
+            # Track function calls
+            try:
+                call_name = ast.unparse(node.func)
+                func_info['calls'].add(call_name)
+            except:
+                pass
+        
+        # Check for Name nodes (potential free variables)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            name = node.id
+            # Skip if it's defined in current scope, imported, or builtin
+            if (name not in self.current_scope_vars and 
+                name not in self.global_imports and
+                name not in dir(__builtins__)):
+                func_info['free_variables'].add(name)
+        
+        # Track assignments in current scope
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.current_scope_vars.add(target.id)
+        
+        # Recurse
+        for child in ast.iter_child_nodes(node):
+            self._analyze_node_for_vars(child, func_info)
+
+
+def analyze_standalone_file(filepath: str, function_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Analyze a standalone Python file to extract function requirements.
+    
+    Args:
+        filepath: Path to the Python file
+        function_name: Optional specific function to analyze
+        
+    Returns:
+        Dictionary with analysis results
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            source_code = f.read()
+    except Exception as e:
+        return {'error': f"Failed to read file: {e}"}
+    
+    try:
+        tree = ast.parse(source_code, filename=filepath)
+    except SyntaxError as e:
+        return {'error': f"Syntax error in file: {e}"}
+    
+    analyzer = FunctionRequirementsAnalyzer(function_name)
+    analyzer.visit(tree)
+    
+    if not analyzer.functions_found:
+        if function_name:
+            return {'error': f"Function '{function_name}' not found in file"}
+        else:
+            return {'error': "No functions found in file"}
+    
+    # Convert sets to lists for JSON serialization
+    result = {
+        'file': filepath,
+        'analyzed_at': datetime.now().isoformat(),
+        'functions': {}
+    }
+    
+    for func_name, func_info in analyzer.functions_found.items():
+        result['functions'][func_name] = {
+            'name': func_info['name'],
+            'parameters': func_info['parameters'],
+            'return_annotation': func_info['return_annotation'],
+            'decorators': func_info['decorators'],
+            'free_variables': sorted(list(func_info['free_variables'])),
+            'environment_variables': sorted(list(func_info['env_vars'])),
+            'external_calls': sorted(list(func_info['calls']))[:20]  # Limit to 20 most common
+        }
+    
+    return result
+
+
+# ============================================================================
+# Updated Main CLI (with subcommands)
+# ============================================================================
+
+def main_cli():
+    """Command-line interface with subcommands."""
+    parser = argparse.ArgumentParser(
+        description='Consolidate Python code & analyze standalone files',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Consolidate (default): creates standalone file
+  %(prog)s crazy_functions/MyFeature.py
+  
+  # Analyze: inspect standalone file requirements
+  %(prog)s analyze Standalones/MyFeature_STANDALONE.py
+  %(prog)s analyze myfile.py --function main
+  
+  # Lint & Format
+  %(prog)s lint
+  %(prog)s format
+        """
+    )
+    
+    parser.add_argument('-v', '--version', action='version', version='%(prog)s 3.1')
+    
+    # Create subparsers
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+    
+    # Analyze command
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze standalone file requirements')
+    analyze_parser.add_argument('filepath', help='Path to Python file to analyze')
+    analyze_parser.add_argument('--function', help='Specific function to analyze')
+    analyze_parser.add_argument('--output', help='Save JSON to file')
+    
+    # Lint command
+    subparsers.add_parser('lint', help='Run linting checks')
+    
+    # Format command
+    subparsers.add_parser('format', help='Run code formatters')
+    
+    # Default consolidation (backward compat)
+    parser.add_argument('repo_path', nargs='?', help='Path to consolidate')
+    parser.add_argument('-o', '--output', help='Output file path')
+    parser.add_argument('-q', '--quiet', action='store_true', help='Suppress output')
+    parser.add_argument('--dry-run', action='store_true', help='Preview only')
+    parser.add_argument('--no-backup', action='store_true', help='No backup')
+    
+    args = parser.parse_args()
+    
+    # Route to appropriate handler
+    if args.command == 'analyze':
+        result = analyze_standalone_file(args.filepath, args.function)
+        output_json = json.dumps(result, indent=2)
+        
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(output_json)
+            print(f"✅ Analysis saved to: {args.output}")
+        else:
+            print(output_json)
+        
+        sys.exit(0 if 'error' not in result else 1)
+    
+    elif args.command == 'lint':
+        lint()
+        sys.exit(0)
+    
+    elif args.command == 'format':
+        format_code()
+        sys.exit(0)
+    
+    # Default: consolidation
+    if not args.repo_path:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Call original main() logic
+    main()
+
+
+if __name__ == '__main__':
+    # Use new CLI with subcommands
+    main_cli()
