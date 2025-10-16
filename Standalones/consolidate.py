@@ -59,9 +59,9 @@ logger = logging.getLogger(__name__)
 
 # Directory configuration for lint/format operations
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-BACKEND_DIR = "."
-LIBS_DIR = "../autogpt_libs"
-TARGET_DIRS = [BACKEND_DIR, LIBS_DIR]
+#BACKEND_DIR = "."
+#LIBS_DIR = "../autogpt_libs"
+TARGET_DIRS = ["."]  # Lint/format current directory only
 
 
 class ImportType(Enum):
@@ -1294,23 +1294,13 @@ def run(*command: str) -> None:
 
 def lint():
     """Run linting checks on codebase."""
-    # Filter TARGET_DIRS to only existing paths
-    existing_dirs = [d for d in TARGET_DIRS if os.path.exists(os.path.join(SCRIPT_DIR, d))]
-    
-    if not existing_dirs:
-        logger.warning("No target directories found for linting")
-        return
-    
     lint_step_args: list[list[str]] = [
-        ["ruff", "check", *existing_dirs, "--exit-zero"],
-        ["ruff", "format", "--diff", "--check", LIBS_DIR] if os.path.exists(os.path.join(SCRIPT_DIR, LIBS_DIR)) else None,
-        ["isort", "--diff", "--check", "--profile", "black", BACKEND_DIR],
-        ["black", "--diff", "--check", BACKEND_DIR],
-        ["pyright", *existing_dirs],
+        ["ruff", "check", ".", "--exit-zero"],
+        ["ruff", "format", "--diff", "--check", "."],
+        ["isort", "--diff", "--check", "--profile", "black", "."],
+        ["black", "--diff", "--check", "."],
+        ["pyright", "."],
     ]
-    
-    # Filter out None entries
-    lint_step_args = [args for args in lint_step_args if args is not None]
     
     lint_error = None
     for args in lint_step_args:
@@ -1320,26 +1310,17 @@ def lint():
             lint_error = e
 
     if lint_error:
-        print("Lint failed, try running `poetry run format` to fix the issues")
+        print("Lint failed, try running 'python consolidate.py format' to fix the issues")
         sys.exit(1)
 
 
 def format_code():
     """Run code formatters on codebase."""
-    existing_dirs = [d for d in TARGET_DIRS if os.path.exists(os.path.join(SCRIPT_DIR, d))]
-    
-    if not existing_dirs:
-        logger.warning("No target directories found for formatting")
-        return
-        
-    run("ruff", "check", "--fix", *existing_dirs)
-    
-    if os.path.exists(os.path.join(SCRIPT_DIR, LIBS_DIR)):
-        run("ruff", "format", LIBS_DIR)
-        
-    run("isort", "--profile", "black", BACKEND_DIR)
-    run("black", BACKEND_DIR)
-    run("pyright", *existing_dirs)
+    run("ruff", "check", "--fix", ".")
+    run("ruff", "format", ".")
+    run("isort", "--profile", "black", ".")
+    run("black", ".")
+    run("pyright", ".")
 
 
 # ============================================================================
