@@ -1179,6 +1179,245 @@ class CodebaseConsolidator:
             )
             return False
 
+# ============================================================================
+# Standalone File Analyzer
+# ============================================================================
+
+class StandaloneAnalyzer:
+    """Analyzes a consolidated standalone file to identify requirements and dependencies."""
+    
+    def __init__(self, filepath: str):
+        self.filepath = Path(filepath)
+        self.tree = None
+        self.external_imports = []
+        self.function_params = {}
+        self.global_vars = {}
+        self.config_access = []
+        
+    def analyze(self) -> Dict[str, Any]:
+        """Perform complete analysis of the standalone file."""
+        if not self.filepath.exists():
+            return {"error": f"File not found: {self.filepath}"}
+        
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                code = f.read()
+            self.tree = ast.parse(code, filename=str(self.filepath))
+        except SyntaxError as e:
+            return {"error": f"Syntax error: {e}"}
+        
+        self._analyze_imports()
+        self._analyze_functions()
+        self._analyze_globals()
+        self._analyze_config_usage()
+        
+        return {
+            "file": str(self.filepath),
+            "external_imports": self.external_imports,
+            "function_parameters": self.function_params,
+            "global_variables": self.global_vars,
+            "config_access": self.config_access,
+            "summary": self._generate_summary()
+        }
+    
+    def _analyze_imports(self):
+        """Identify external imports that weren't inlined."""
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.external_imports.append({
+                        "type": "import",
+                        "module": alias.name,
+                        "alias": alias.asname,
+                        "line": node.lineno
+                    })
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                for alias in node.names:
+                    self.external_imports.append({
+                        "type": "from_import",
+                        "module": module,
+                        "name": alias.name,
+                        "alias": alias.asname,
+                        "line": node.lineno
+                    })
+    
+    def _analyze_functions(self):
+        """Extract function signatures and parameters."""
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef):
+                args_info = {
+                    "args": [arg.arg for arg in node.args.args],
+                    "defaults": len(node.args.defaults),
+                    "kwonlyargs": [arg.arg for arg in node.args.kwonlyargs],
+                    "vararg": node.args.vararg.arg if node.args.vararg else None,
+                    "kwarg": node.args.kwarg.arg if node.args.kwarg else None,
+                    "line": node.lineno
+                }
+                self.function_params[node.name] = args_info
+    
+    def _analyze_globals(self):
+        """Find global variable assignments."""
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store):
+                        # Try to get the value
+                        try:
+                            value_str = ast.unparse(node.value) if hasattr(ast, 'unparse') else "..."
+                        except:
+                            value_str = "..."
+                        
+                        self.global_vars[target.id] = {
+                            "value": value_str,
+                            "line": node.lineno
+                        }
+    
+    def _analyze_config_usage(self):
+        """Find calls to configuration functions like get_conf()."""
+        config_funcs = ['get_conf', 'getenv', 'environ', 'config']
+        
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Call):
+                func_name = None
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                
+                if func_name and any(cf in func_name.lower() for cf in config_funcs):
+                    # Try to extract the config key
+                    config_key = None
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        config_key = node.args[0].value
+                    
+                    self.config_access.append({
+                        "function": func_name,
+                        "key": config_key,
+                        "line": node.lineno
+                    })
+    
+    def _generate_summary(self) -> Dict[str, Any]:
+        """Generate a summary of analysis results."""
+        # Group external imports by module
+        import_modules = set()
+        for imp in self.external_imports:
+            if imp["type"] == "import":
+                import_modules.add(imp["module"])
+            else:
+                import_modules.add(imp["module"])
+        
+        # Find entry point functions (those without many dependencies)
+        entry_points = []
+        for func_name, info in self.function_params.items():
+            # Heuristic: entry points often have descriptive names
+            if any(keyword in func_name.lower() for keyword in ['main', 'run', 'execute', 'start', 'process']):
+                entry_points.append(func_name)
+        
+        return {
+            "total_external_imports": len(self.external_imports),
+            "unique_modules": len(import_modules),
+            "total_functions": len(self.function_params),
+            "potential_entry_points": entry_points,
+            "config_dependencies": len(self.config_access),
+            "global_variables": len(self.global_vars)
+        }
+    
+    def print_report(self, analysis: Dict[str, Any]):
+        """Print a formatted analysis report."""
+        print("\n" + "="*70)
+        print(f"STANDALONE FILE ANALYSIS: {Path(analysis['file']).name}")
+        print("="*70 + "\n")
+        
+        # External Dependencies
+        print("📦 EXTERNAL DEPENDENCIES")
+        print("-" * 70)
+        if analysis['external_imports']:
+            import_by_module = {}
+            for imp in analysis['external_imports']:
+                module = imp['module']
+                if module not in import_by_module:
+                    import_by_module[module] = []
+                import_by_module[module].append(imp)
+            
+            for module, imports in sorted(import_by_module.items()):
+                print(f"\n  {module}:")
+                for imp in imports:
+                    if imp['type'] == 'import':
+                        alias_str = f" as {imp['alias']}" if imp['alias'] else ""
+                        print(f"    - import {imp['module']}{alias_str} (line {imp['line']})")
+                    else:
+                        alias_str = f" as {imp['alias']}" if imp['alias'] else ""
+                        print(f"    - from {imp['module']} import {imp['name']}{alias_str} (line {imp['line']})")
+        else:
+            print("  ✅ No external imports - fully standalone!")
+        
+        # Configuration Dependencies
+        print("\n⚙️  CONFIGURATION REQUIREMENTS")
+        print("-" * 70)
+        if analysis['config_access']:
+            config_keys = set()
+            for config in analysis['config_access']:
+                if config['key']:
+                    config_keys.add(config['key'])
+            
+            if config_keys:
+                print(f"  Required configuration keys:")
+                for key in sorted(config_keys):
+                    print(f"    - {key}")
+            else:
+                print(f"  {len(analysis['config_access'])} config function calls (keys not statically determined)")
+        else:
+            print("  ✅ No configuration dependencies detected")
+        
+        # Function Entry Points
+        print("\n🎯 FUNCTION ANALYSIS")
+        print("-" * 70)
+        summary = analysis['summary']
+        print(f"  Total functions: {summary['total_functions']}")
+        
+        if summary['potential_entry_points']:
+            print(f"\n  Potential entry points:")
+            for func in summary['potential_entry_points']:
+                params = analysis['function_parameters'][func]
+                args_str = ", ".join(params['args'])
+                print(f"    - {func}({args_str})")
+        
+        # Global Variables
+        print("\n🌐 GLOBAL VARIABLES")
+        print("-" * 70)
+        if analysis['global_variables']:
+            print(f"  Found {len(analysis['global_variables'])} global variables:")
+            for var_name, info in list(analysis['global_variables'].items())[:10]:  # Show first 10
+                value_preview = info['value'][:50] + "..." if len(info['value']) > 50 else info['value']
+                print(f"    - {var_name} = {value_preview}")
+            if len(analysis['global_variables']) > 10:
+                print(f"    ... and {len(analysis['global_variables']) - 10} more")
+        else:
+            print("  No global variables found")
+        
+        # Summary
+        print("\n📊 SUMMARY")
+        print("-" * 70)
+        print(f"  External modules needed: {summary['unique_modules']}")
+        print(f"  Configuration keys: {summary['config_dependencies']}")
+        print(f"  Defined functions: {summary['total_functions']}")
+        
+        # Recommendations
+        print("\n💡 RECOMMENDATIONS")
+        print("-" * 70)
+        if summary['unique_modules'] > 0:
+            print("  ⚠️  This file has external dependencies and is NOT fully standalone")
+            print("     Consider re-running consolidation with these modules included")
+        else:
+            print("  ✅ File appears to be fully standalone!")
+        
+        if summary['config_dependencies'] > 0:
+            print("  ⚠️  This file requires runtime configuration")
+            print("     Ensure config values are provided when running")
+        
+        print("\n" + "="*70 + "\n")
+
 
 # ============================================================================
 # CLI Interface
