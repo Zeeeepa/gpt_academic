@@ -98,6 +98,7 @@ class ModuleInfo:
     imports: Set[ImportStatement] = field(default_factory=set)
     dependencies: Set[str] = field(default_factory=set)
     processed_content: str = ""
+    ast_tree: Optional[ast.AST] = None
 
 
 # ============================================================================
@@ -935,59 +936,89 @@ class CodebaseConsolidator:
         """Analyze imports and build dependency information for all files."""
         self.log("Analyzing dependencies...")
         
-        import_processor = ImportProcessor(self.local_modules)
-        
+        # PASS 1: Build all ModuleInfo objects first (without dependencies)
+        self.log("Pass 1: Building module registry...")
         for module_name, file_path in self.python_files.items():
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     
-                # Parse AST to find imports
+                # Parse AST
                 try:
                     tree = ast.parse(content)
-                    dependencies = self._extract_local_dependencies(tree)
                 except SyntaxError as e:
-                    self.error_healer.log_warning(
-                        f"Syntax error in {file_path}: {e}"
-                    )
-                    dependencies = set()
+                    self.error_healer.log_warning(f"Syntax error in {file_path}: {e}")
+                    tree = None
                     
-                # Create module info
+                # Create module info with empty dependencies
                 module_info = ModuleInfo(
                     file_path=str(file_path),
                     module_name=module_name,
                     content=content,
-                    dependencies=dependencies
+                    dependencies=set(),
+                    ast_tree=tree
                 )
-                
                 self.modules[module_name] = module_info
                 
             except Exception as e:
-                self.error_healer.log_error(
-                    e, context="analyze_dependencies",
-                    file_path=str(file_path)
-                )
-                
-        self.log(f"Analyzed {len(self.modules)} modules")
+                self.error_healer.log_error(e, context="analyze_dependencies_pass1", file_path=str(file_path))
+            
+        self.log(f"Pass 1 complete: Registered {len(self.modules)} modules")
         
+        # PASS 2: Extract dependencies
+        self.log("Pass 2: Extracting dependencies...")
+        for module_name, module_info in self.modules.items():
+            if module_info.ast_tree is not None:
+                try:
+                    dependencies = self._extract_local_dependencies(module_info.ast_tree)
+                    module_info.dependencies = dependencies
+                except Exception as e:
+                    self.error_healer.log_warning(f"Could not extract dependencies for {module_name}: {e}")
+                    module_info.dependencies = set()
+            
+        self.log(f"Pass 2 complete: Analyzed {len(self.modules)} modules")
     def _extract_local_dependencies(self, tree: ast.AST) -> Set[str]:
         """Extract local module dependencies from AST."""
         deps = set()
+        
+        def find_best_match(module_name):
+            """Find the longest matching local module for a given import."""
+            # Try exact match first
+            if module_name in self.modules:
+                self.log(f"DEBUG: Exact match for {module_name}")
+                return module_name
+            
+            # Try progressively shorter prefixes
+            parts = module_name.split('.')
+            for i in range(len(parts), 0, -1):
+                prefix = '.'.join(parts[:i])
+                if prefix in self.modules:
+                    self.log(f"DEBUG: Prefix match {prefix} for {module_name}")
+                    return prefix
+            
+            # Fallback to base module if it's local
+            base = parts[0]
+            if base in self.local_modules:
+                self.log(f"DEBUG: Base match {base} for {module_name}")
+                return base
+            
+            self.log(f"DEBUG: No match for {module_name}")
+            return None
         
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     module = alias.name
-                    base = module.split('.')[0]
-                    if base in self.local_modules:
-                        deps.add(module if module in self.modules else base)
+                    best_match = find_best_match(module)
+                    if best_match:
+                        deps.add(best_match)
                         
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     module = node.module
-                    base = module.split('.')[0]
-                    if base in self.local_modules:
-                        deps.add(module if module in self.modules else base)
+                    best_match = find_best_match(module)
+                    if best_match:
+                        deps.add(best_match)
                         
         return deps
         
