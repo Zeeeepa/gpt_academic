@@ -38,6 +38,7 @@ import argparse
 import shutil
 import json
 import hashlib
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional, Any
 from dataclasses import dataclass, field
@@ -1503,99 +1504,7 @@ class StandaloneAnalyzer:
 # CLI Interface
 # ============================================================================
 
-def main():
-    """Command-line interface."""
-    parser = argparse.ArgumentParser(
-        description='Consolidate a Python codebase into a standalone file',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s /path/to/repo
-  %(prog)s /path/to/repo -o output.py
-  %(prog)s crazy_functions/Dynamic_Function_Generate.py
-  %(prog)s . --quiet
 
-For more information, see: https://github.com/yourusername/consolidate
-        """
-    )
-    
-    parser.add_argument(
-        'repo_path',
-        help='Path to repository or Python file to consolidate'
-    )
-    
-    parser.add_argument(
-        '-o', '--output',
-        help='Output file path (default: <repo_name>_standalone.py)'
-    )
-    
-    parser.add_argument(
-        '-q', '--quiet',
-        action='store_true',
-        help='Suppress non-error output'
-    )
-    
-    parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Run without writing output file (preview only)'
-    )
-    
-    parser.add_argument(
-        '--no-backup',
-        action='store_true',
-        help='Do not create backup of existing output file'
-    )
-    
-    
-    parser.add_argument(
-        '--entry-point',
-        help='Specific file to use as entry point (relative to repo_path). Only dependencies of this file will be included.'
-    )
-    parser.add_argument(
-        '-v', '--version',
-        action='version',
-        version='%(prog)s 3.0'
-    )
-    
-    args = parser.parse_args()
-    
-    # Determine output path
-    if args.output:
-        output_path = args.output
-    else:
-        repo_path = Path(args.repo_path).resolve()
-        if repo_path.is_file():
-            # Single file - use its directory name
-            repo_name = repo_path.parent.name
-            output_name = f"{repo_path.stem}_standalone.py"
-        else:
-            repo_name = repo_path.name
-            output_name = f"{repo_name}_standalone.py"
-        output_path = str(Path.cwd() / output_name)
-        
-    # Run consolidation
-    consolidator = CodebaseConsolidator(
-        args.repo_path,
-        verbose=not args.quiet,
-        dry_run=args.dry_run,
-        create_backup=not args.no_backup,
-        entry_point=args.entry_point if hasattr(args, 'entry_point') else None
-    )
-    
-    success = consolidator.consolidate(output_path)
-    
-    sys.exit(0 if success else 1)
-
-
-if __name__ == '__main__':
-    main()
-
-# ============================================================================
-# Code Quality Helper Functions (v3.1 - Full Comprehension)
-# ============================================================================
-
-# Directory configuration
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 BACKEND_DIR = "."
 LIBS_DIR = "../autogpt_libs"
@@ -1677,29 +1586,126 @@ def format() -> None:
     run("pyright", *TARGET_DIRS)
 
 
-def analyze_requirements() -> Dict[str, Any]:
+def analyze_requirements(output_file: str) -> Dict[str, Any]:
     """
     Analyze the consolidated code to identify initial variable/argument
     requirements for standalone operation.
     
+    Args:
+        output_file: Path to the consolidated standalone file
+    
     Returns:
         dict: Analysis results containing:
             - required_env_vars: Environment variables needed
-            - required_args: Command-line arguments needed
+            - required_args: Command-line arguments needed  
             - required_configs: Configuration values needed
             - external_dependencies: External packages/services needed
             - entry_points: Detected entry points (main functions)
+            - function_parameters: Parameters for each function
     """
+    if not os.path.exists(output_file):
+        logger.error(f"Output file not found: {output_file}")
+        return {}
+    
+    logger.info(f"Analyzing consolidated code requirements for: {output_file}")
+    
+    with open(output_file, 'r', encoding='utf-8') as f:
+        source_code = f.read()
+    
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError as e:
+        logger.error(f"Syntax error in consolidated file: {e}")
+        return {}
+    
     analysis = {
         "required_env_vars": set(),
-        "required_args": [],
+        "required_args": set(),
         "required_configs": {},
         "external_dependencies": set(),
-        "entry_points": []
+        "entry_points": [],
+        "function_parameters": {}
     }
     
-    # This would be called after consolidation to analyze the output
-    logger.info("Analyzing consolidated code requirements...")
+    # Analyze AST
+    for node in ast.walk(tree):
+        # Find environment variable access: os.environ['VAR']
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Attribute):
+                if (isinstance(node.value.value, ast.Name) and 
+                    node.value.value.id == 'os' and 
+                    node.value.attr == 'environ'):
+                    if isinstance(node.slice, ast.Constant):
+                        analysis["required_env_vars"].add(node.slice.value)
+        
+        # Find os.getenv calls
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                if (isinstance(node.func.value, ast.Name) and
+                    node.func.value.id == 'os' and
+                    node.func.attr == 'getenv'):
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        analysis["required_env_vars"].add(node.args[0].value)
+        
+        # Find argparse usage
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                if node.func.attr == 'add_argument':
+                    if node.args and isinstance(node.args[0], ast.Constant):
+                        arg_name = node.args[0].value
+                        if arg_name.startswith('-'):
+                            analysis["required_args"].add(arg_name)
+        
+        # Find function definitions (potential entry points)
+        if isinstance(node, ast.FunctionDef):
+            # Check if it's a main-like function
+            if node.name in ['main', '__main__', 'run', 'execute', 'start']:
+                analysis["entry_points"].append({
+                    "name": node.name,
+                    "args": [arg.arg for arg in node.args.args],
+                    "line": node.lineno
+                })
+            
+            # Collect all function parameters
+            if node.args.args:
+                analysis["function_parameters"][node.name] = {
+                    "args": [arg.arg for arg in node.args.args],
+                    "defaults": len(node.args.defaults),
+                    "line": node.lineno
+                }
+    
+    # Find import statements for external dependencies
+    stdlib_modules = {
+        'os', 'sys', 'time', 'json', 're', 'ast', 'typing',
+        'pathlib', 'collections', 'dataclasses', 'enum',
+        'logging', 'argparse', 'subprocess', 'shutil', 'hashlib',
+        'datetime', 'itertools', 'functools', 'contextlib', 'io',
+        'copy', 'pickle', 'base64', 'uuid', 'urllib', 'http',
+        'ssl', 'socket', 'threading', 'multiprocessing', 'queue'
+    }
+    
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split('.')[0] not in stdlib_modules:
+                    analysis["external_dependencies"].add(alias.name)
+        
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                root_module = node.module.split('.')[0]
+                if root_module not in stdlib_modules and root_module not in ['typing', '__future__']:
+                    analysis["external_dependencies"].add(node.module)
+    
+    # Convert sets to sorted lists for JSON serialization
+    analysis["required_env_vars"] = sorted(analysis["required_env_vars"])
+    analysis["required_args"] = sorted(analysis["required_args"])
+    analysis["external_dependencies"] = sorted(analysis["external_dependencies"])
+    
+    logger.info(f"✓ Analysis complete:")
+    logger.info(f"  - Environment variables: {len(analysis['required_env_vars'])}")
+    logger.info(f"  - CLI arguments: {len(analysis['required_args'])}")
+    logger.info(f"  - External dependencies: {len(analysis['external_dependencies'])}")
+    logger.info(f"  - Entry points: {len(analysis['entry_points'])}")
     
     return analysis
 
@@ -1731,3 +1737,135 @@ def extend_cli_with_quality_commands(parser: argparse.ArgumentParser) -> None:
 #   python consolidate.py lint      # Run linting
 #   python consolidate.py format    # Auto-format
 #   python consolidate.py analyze   # Analyze requirements
+
+
+def main():
+    """Command-line interface."""
+    parser = argparse.ArgumentParser(
+        description='Consolidate a Python codebase into a standalone file',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s /path/to/repo
+  %(prog)s /path/to/repo -o output.py
+  %(prog)s crazy_functions/Dynamic_Function_Generate.py
+  %(prog)s . --quiet
+
+For more information, see: https://github.com/yourusername/consolidate
+        """
+    )
+    
+    parser.add_argument(
+        'repo_path',
+        help='Path to repository or Python file to consolidate'
+    )
+    
+    parser.add_argument(
+        '-o', '--output',
+        help='Output file path (default: <repo_name>_standalone.py)'
+    )
+    
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Suppress non-error output'
+    )
+    
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Run without writing output file (preview only)'
+    )
+    
+    parser.add_argument(
+        '--no-backup',
+        action='store_true',
+        help='Do not create backup of existing output file'
+    )
+
+    parser.add_argument(
+        '--analyze',
+        action='store_true',
+        help='Analyze requirements after consolidation and generate JSON report'
+    )
+    
+    
+    parser.add_argument(
+        '--entry-point',
+        help='Specific file to use as entry point (relative to repo_path). Only dependencies of this file will be included.'
+    )
+    parser.add_argument(
+        '-v', '--version',
+        action='version',
+        version='%(prog)s 3.0'
+    )
+    
+    args = parser.parse_args()
+    
+    # Determine output path
+    if args.output:
+        output_path = args.output
+    else:
+        repo_path = Path(args.repo_path).resolve()
+        if repo_path.is_file():
+            # Single file - use its directory name
+            repo_name = repo_path.parent.name
+            output_name = f"{repo_path.stem}_standalone.py"
+        else:
+            repo_name = repo_path.name
+            output_name = f"{repo_name}_standalone.py"
+        output_path = str(Path.cwd() / output_name)
+        
+    # Run consolidation
+    consolidator = CodebaseConsolidator(
+        args.repo_path,
+        verbose=not args.quiet,
+        dry_run=args.dry_run,
+        create_backup=not args.no_backup,
+        entry_point=args.entry_point if hasattr(args, 'entry_point') else None
+    )
+    
+    success = consolidator.consolidate(output_path)
+    
+    # Run analysis if requested and consolidation succeeded
+    if success and args.analyze:
+        logger.info("\n" + "="*60)
+        logger.info("Running requirement analysis...")
+        logger.info("="*60)
+        
+        analysis = analyze_requirements(output_path)
+        
+        # Save analysis to JSON file
+        analysis_output = output_path.replace('.py', '_analysis.json')
+        with open(analysis_output, 'w') as f:
+            json.dump(analysis, f, indent=2, default=str)
+        
+        logger.info(f"✓ Analysis report saved to: {analysis_output}")
+        
+        # Print summary
+        if analysis.get('required_env_vars'):
+            logger.info(f"\n📌 Required Environment Variables:")
+            for var in analysis['required_env_vars']:
+                logger.info(f"   - {var}")
+        
+        if analysis.get('required_args'):
+            logger.info(f"\n📌 Required CLI Arguments:")
+            for arg in analysis['required_args']:
+                logger.info(f"   - {arg}")
+        
+        if analysis.get('external_dependencies'):
+            logger.info(f"\n📌 External Dependencies:")
+            for dep in analysis['external_dependencies']:
+                logger.info(f"   - {dep}")
+        
+        if analysis.get('entry_points'):
+            logger.info(f"\n📌 Entry Points:")
+            for ep in analysis['entry_points']:
+                logger.info(f"   - {ep['name']}() at line {ep['line']}")
+    
+    sys.exit(0 if success else 1)
+
+
+
+if __name__ == '__main__':
+    main()
