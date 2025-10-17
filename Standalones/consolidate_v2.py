@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """
-Advanced Code Consolidation Tool
-Consolidates Python projects into standalone files with complete dependency context.
+Standalone Code Consolidation Tool
+Creates a single standalone Python file with all dependencies included.
 
-Features:
-- Complete dependency graph analysis using IR
-- Transitive dependency resolution
-- Import pattern detection (standard, dynamic, conditional)
-- Configurable inclusion strategies
-- Tree-shaking with multiple modes
-- Module ordering and namespace preservation
+NO EXTERNAL DEPENDENCIES REQUIRED - Uses only Python standard library (ast, os, sys, etc.)
 """
 
 import argparse
@@ -25,19 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-# Import the IR and parser infrastructure
-try:
-    from IR import (
-        Code, Project, File, SymbolInfo, ValueDeclaration, 
-        ContainerDeclaration, FunctionKind, Import, Declaration
-    )
-    from parser import parse_files_in_paths
-    from sanitizer import CodeSanitizer
-except ImportError:
-    print("Error: Required modules (IR, parser, sanitizer) not found.")
-    print("Please ensure these modules are in the same directory or PYTHONPATH.")
-    sys.exit(1)
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -48,348 +29,282 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ConsolidationConfig:
-    """Configuration for consolidation strategy"""
-    inclusion_mode: str = "complete"  # minimal, standard, complete, custom
-    tree_shaking: str = "off"  # off, conservative, moderate, aggressive
-    include_docstrings: bool = True
-    include_comments: bool = True
-    include_type_hints: bool = True
-    max_depth: int = -1  # -1 for unlimited
-    whitelist: Set[str] = field(default_factory=set)
-    blacklist: Set[str] = field(default_factory=set)
-    include_external_stubs: bool = True
-    preserve_structure: bool = True
+class ModuleInfo:
+    """Information about a Python module"""
+    path: str  # Relative path from root
+    module_id: str  # Dot-separated module identifier (e.g., "foo.bar.baz")
+    imports: List[Tuple[str, List[str]]] = field(default_factory=list)  # (module, names)
+    dependencies: Set[str] = field(default_factory=set)  # Module IDs this depends on
+    external_imports: Set[str] = field(default_factory=set)  # External package names
+    ast_tree: Optional[ast.Module] = None  # Parsed AST
+    code: str = ""  # Source code
+    symbols: Set[str] = field(default_factory=set)  # Defined symbols (functions, classes)
     
-    @classmethod
-    def from_args(cls, args):
-        """Create config from command line arguments"""
-        return cls(
-            inclusion_mode=args.mode,
-            tree_shaking=args.tree_shaking,
-            include_docstrings=not args.no_docstrings,
-            include_comments=not args.no_comments,
-            include_type_hints=not args.no_type_hints,
-            max_depth=args.max_depth,
-            whitelist=set(args.whitelist) if args.whitelist else set(),
-            blacklist=set(args.blacklist) if args.blacklist else set(),
-            include_external_stubs=args.external_stubs,
-            preserve_structure=args.preserve_structure
-        )
+    def __hash__(self):
+        return hash(self.module_id)
 
 
-@dataclass
-class ModuleNode:
-    """Represents a module in the dependency graph"""
-    qualified_id: str
-    file: File
-    symbols: Set[SymbolInfo] = field(default_factory=set)
-    dependencies: Set[str] = field(default_factory=set)  # Other module qualified IDs
-    external_imports: Set[str] = field(default_factory=set)
-    import_statements: List[Import] = field(default_factory=list)
-    is_entry: bool = False
-    depth: int = -1
-
-
-class AdvancedConsolidator:
+class StandaloneConsolidator:
     """
-    Advanced code consolidation with complete dependency analysis.
+    Standalone consolidation tool using only Python standard library.
+    
+    Features:
+    - Two-pass dependency analysis
+    - Complete transitive dependency resolution
+    - Import deduplication
+    - Topological module ordering
+    - External package detection
     """
     
-    def __init__(self, config: ConsolidationConfig):
-        self.config = config
-        self.project: Optional[Project] = None
-        self.module_graph: Dict[str, ModuleNode] = {}
+    def __init__(self, root_path: str):
+        self.root_path = os.path.abspath(root_path)
+        self.modules: Dict[str, ModuleInfo] = {}  # module_id -> ModuleInfo
         self.external_packages: Set[str] = set()
-        self.sanitizer: Optional[CodeSanitizer] = None
         self.stats = {
             'total_files': 0,
-            'included_files': 0,
+            'parsed_files': 0,
+            'included_modules': 0,
             'external_packages': 0,
-            'dynamic_imports': 0,
-            'conditional_imports': 0
+            'parse_errors': 0
         }
         
-    def consolidate(self, root_path: str, entry_point: str, output_path: str) -> None:
-        """
-        Main consolidation workflow.
+    def consolidate(self, entry_point: str, output_path: str, mode: str = "complete") -> None:
+        """Main consolidation workflow"""
+        logger.info(f"=== Standalone Consolidation ===")
+        logger.info(f"Root: {self.root_path}")
+        logger.info(f"Entry: {entry_point}")
+        logger.info(f"Mode: {mode}")
         
-        Args:
-            root_path: Root directory of the project
-            entry_point: Entry point file (relative to root_path)
-            output_path: Output file path for consolidated code
-        """
-        logger.info(f"Starting consolidation from {entry_point}")
-        logger.info(f"Root path: {root_path}")
-        logger.info(f"Config: {self.config.inclusion_mode} mode, tree_shaking={self.config.tree_shaking}")
+        # Phase 1 & 2: Parse and analyze (two-pass)
+        logger.info("\n[Phase 1] Discovering Python files...")
+        self._discover_python_files()
+        logger.info(f"Found {self.stats['total_files']} Python files")
         
-        # Step 1: Parse the project using IR
-        logger.info("Phase 1: Parsing project...")
-        self.project = self._parse_project(root_path)
-        self.stats['total_files'] = len(self.project.get_files())
-        logger.info(f"Parsed {self.stats['total_files']} Python files")
+        logger.info("\n[Phase 2] Parsing and analyzing dependencies (two-pass)...")
+        self._analyze_dependencies()
+        logger.info(f"Successfully parsed {self.stats['parsed_files']}/{self.stats['total_files']} files")
         
-        # Step 2: Build module dependency graph
-        logger.info("Phase 2: Building dependency graph...")
-        self._build_module_graph()
+        # Phase 3: Resolve entry point and collect
+        logger.info("\n[Phase 3] Resolving dependencies...")
+        entry_module_id = self._resolve_entry_point(entry_point)
+        if not entry_module_id:
+            raise ValueError(f"Entry point {entry_point} not found")
         
-        # Step 3: Analyze entry point and collect dependencies
-        logger.info("Phase 3: Analyzing dependencies...")
-        entry_file = self._resolve_entry_point(root_path, entry_point)
-        if not entry_file:
-            raise ValueError(f"Entry point {entry_point} not found in project")
+        if mode == "complete":
+            # Include ALL local modules
+            included = set(self.modules.keys())
+        else:
+            # Include only reachable from entry
+            included = self._collect_transitive_dependencies(entry_module_id)
         
-        included_modules = self._collect_dependencies(entry_file)
-        self.stats['included_files'] = len(included_modules)
-        logger.info(f"Included {self.stats['included_files']}/{self.stats['total_files']} modules")
+        self.stats['included_modules'] = len(included)
+        logger.info(f"Including {self.stats['included_modules']} modules")
         
-        # Step 4: Order modules topologically
-        logger.info("Phase 4: Determining load order...")
-        ordered_modules = self._topological_sort(included_modules)
-        logger.info(f"Determined load order for {len(ordered_modules)} modules")
+        # Phase 4: Topological sort
+        logger.info("\n[Phase 4] Ordering modules...")
+        ordered = self._topological_sort(included)
+        logger.info(f"Ordered {len(ordered)} modules")
         
-        # Step 5: Generate consolidated code
-        logger.info("Phase 5: Generating consolidated code...")
-        consolidated_code = self._generate_consolidated_code(ordered_modules)
+        # Phase 5: Generate output
+        logger.info("\n[Phase 5] Generating consolidated code...")
+        output = self._generate_output(ordered)
         
-        # Step 6: Write output
-        logger.info(f"Phase 6: Writing to {output_path}...")
-        self._write_output(output_path, consolidated_code)
+        # Phase 6: Write
+        logger.info(f"\n[Phase 6] Writing to {output_path}...")
+        self._write_output(output_path, output)
         
-        # Step 7: Generate report
-        self._generate_report(output_path)
+        # Validate
+        logger.info("\nValidating output...")
+        if self._validate_syntax(output):
+            logger.info("✓ Syntax validation passed")
+        else:
+            logger.warning("⚠ Syntax validation failed")
         
-        logger.info("✓ Consolidation complete!")
-        logger.info(f"  Output: {output_path}")
-        logger.info(f"  Size: {len(consolidated_code):,} bytes ({len(consolidated_code)/1024:.1f} KB)")
-        logger.info(f"  Modules: {self.stats['included_files']}")
-    
-    def _parse_project(self, root_path: str) -> Project:
-        """Parse all Python files in the project using IR parser"""
-        def file_filter(path: str) -> bool:
-            # Skip test files, __pycache__, etc.
-            if '__pycache__' in path or path.endswith('.pyc'):
-                return False
-            if '/test' in path or '/tests/' in path:
-                return False
-            return True
+        # Summary
+        logger.info("\n" + "="*70)
+        logger.info("Summary:")
+        logger.info(f"  Errors: {self.stats['parse_errors']}")
+        logger.info(f"  Warnings: {len(self.external_packages)}")
+        logger.info(f"  Skipped files: {self.stats['total_files'] - self.stats['parsed_files']}")
+        logger.info(f"Detailed report saved to: {output_path.replace('.py', '_report.json')}")
+        logger.info("="*70)
         
-        project = parse_files_in_paths([root_path], filter_file=file_filter)
-        self.sanitizer = CodeSanitizer(project)
-        return project
-    
-    def _build_module_graph(self) -> None:
-        """Build complete module dependency graph"""
-        for file in self.project.get_files():
-            module_id = self._file_to_module_id(file)
-            node = ModuleNode(
-                qualified_id=module_id,
-                file=file,
-                import_statements=file._imports
-            )
+    def _discover_python_files(self) -> None:
+        """Discover all Python files in the project"""
+        for root, dirs, files in os.walk(self.root_path):
+            # Skip common exclude patterns
+            dirs[:] = [d for d in dirs if d not in ['__pycache__', '.git', 'node_modules', 'venv', '.venv']]
             
-            # Collect all symbols in this module
-            for symbol_id, symbol in file._symbol_table.items():
-                node.symbols.add(symbol)
-            
-            # Analyze dependencies
-            self._analyze_module_dependencies(node)
-            
-            self.module_graph[module_id] = node
-        
-        logger.info(f"Built graph with {len(self.module_graph)} modules")
-    
-    def _analyze_module_dependencies(self, node: ModuleNode) -> None:
-        """Analyze all dependencies of a module"""
-        # Standard imports
-        for import_stmt in node.import_statements:
-            if import_stmt.module_name:
-                # from X import Y
-                module_name = import_stmt.module_name
-                local_module = self._resolve_local_import(module_name, node.file)
-                if local_module:
-                    node.dependencies.add(local_module)
-                else:
-                    node.external_imports.add(module_name)
-                    self.external_packages.add(module_name.split('.')[0])
-            else:
-                # import X
-                for name in import_stmt.names:
-                    local_module = self._resolve_local_import(name, node.file)
-                    if local_module:
-                        node.dependencies.add(local_module)
-                    else:
-                        node.external_imports.add(name)
-                        self.external_packages.add(name.split('.')[0])
-        
-        # Analyze symbol dependencies
-        for symbol in node.symbols:
-            if isinstance(symbol, ValueDeclaration):
-                self._analyze_symbol_dependencies(symbol, node)
-            elif isinstance(symbol, ContainerDeclaration):
-                for stmt in symbol.body:
-                    if isinstance(stmt, Declaration):
-                        for inner_symbol in stmt.symbols:
-                            self._analyze_symbol_dependencies(inner_symbol, node)
-    
-    def _analyze_symbol_dependencies(self, symbol: SymbolInfo, node: ModuleNode) -> None:
-        """Analyze dependencies within a symbol's code"""
-        if not hasattr(symbol, 'body_sub') or not symbol.body_sub:
-            return
-        
-        try:
-            # Get the body code
-            body_start = symbol.body_sub[0] - symbol.substring[0]
-            body_end = symbol.body_sub[1] - symbol.substring[0]
-            body_text = symbol.get_substring()[body_start:body_end].decode()
-            
-            # Parse to find more imports
-            tree = ast.parse(body_text, mode='exec')
-            for ast_node in ast.walk(tree):
-                # Detect dynamic imports
-                if isinstance(ast_node, ast.Call):
-                    if isinstance(ast_node.func, ast.Name) and ast_node.func.id == '__import__':
-                        self.stats['dynamic_imports'] += 1
-                    elif isinstance(ast_node.func, ast.Attribute):
-                        if (isinstance(ast_node.func.value, ast.Name) and 
-                            ast_node.func.value.id == 'importlib' and
-                            ast_node.func.attr == 'import_module'):
-                            self.stats['dynamic_imports'] += 1
-                
-                # Detect conditional imports
-                elif isinstance(ast_node, (ast.If, ast.Try)):
-                    self.stats['conditional_imports'] += 1
+            for file in files:
+                if file.endswith('.py'):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, self.root_path)
+                    module_id = self._path_to_module_id(rel_path)
                     
-        except Exception as e:
-            logger.debug(f"Could not analyze {symbol.name}: {e}")
-    
-    def _resolve_local_import(self, import_name: str, from_file: File) -> Optional[str]:
-        """Resolve if an import is a local module"""
-        # Try to find in project
-        parts = import_name.split('.')
-        
-        # Try direct file match
-        potential_path = os.path.join(self.project.root_path, *parts) + '.py'
-        for file in self.project.get_files():
-            file_path = os.path.join(self.project.root_path, file.path)
-            if file_path == potential_path:
-                return self._file_to_module_id(file)
-        
-        # Try package __init__.py
-        potential_pkg = os.path.join(self.project.root_path, *parts, '__init__.py')
-        for file in self.project.get_files():
-            file_path = os.path.join(self.project.root_path, file.path)
-            if file_path == potential_pkg:
-                return self._file_to_module_id(file)
-        
+                    # Read source
+                    try:
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            code = f.read()
+                        
+                        module = ModuleInfo(
+                            path=rel_path,
+                            module_id=module_id,
+                            code=code
+                        )
+                        self.modules[module_id] = module
+                        self.stats['total_files'] += 1
+                        
+                    except Exception as e:
+                        logger.debug(f"Could not read {rel_path}: {e}")
+                        
+    def _analyze_dependencies(self) -> None:
+        """Two-pass dependency analysis"""
+        # Pass 1: Parse AST and register all modules
+        logger.info("  Pass 1: Parsing AST for all modules...")
+        for module_id, module in list(self.modules.items()):
+            try:
+                module.ast_tree = ast.parse(module.code)
+                self._extract_symbols(module)
+                self.stats['parsed_files'] += 1
+            except SyntaxError as e:
+                logger.debug(f"Syntax error in {module.path}: {e}")
+                self.stats['parse_errors'] += 1
+                # Keep module but mark as unparseable
+                
+        # Pass 2: Extract dependencies when ALL modules are known
+        logger.info("  Pass 2: Extracting dependencies...")
+        for module_id, module in self.modules.items():
+            if module.ast_tree:
+                self._extract_dependencies(module)
+                
+    def _extract_symbols(self, module: ModuleInfo) -> None:
+        """Extract defined symbols (functions, classes) from module"""
+        if not module.ast_tree:
+            return
+            
+        for node in ast.walk(module.ast_tree):
+            if isinstance(node, ast.FunctionDef):
+                module.symbols.add(node.name)
+            elif isinstance(node, ast.ClassDef):
+                module.symbols.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        module.symbols.add(target.id)
+                        
+    def _extract_dependencies(self, module: ModuleInfo) -> None:
+        """Extract import dependencies from module"""
+        if not module.ast_tree:
+            return
+            
+        for node in ast.walk(module.ast_tree):
+            if isinstance(node, ast.Import):
+                # import foo, bar
+                for alias in node.names:
+                    name = alias.name
+                    dep_module_id = self._resolve_import(name, module)
+                    if dep_module_id:
+                        module.dependencies.add(dep_module_id)
+                        module.imports.append((None, [name]))
+                    else:
+                        module.external_imports.add(name.split('.')[0])
+                        self.external_packages.add(name.split('.')[0])
+                        
+            elif isinstance(node, ast.ImportFrom):
+                # from foo import bar, baz
+                if node.module:
+                    dep_module_id = self._resolve_import(node.module, module)
+                    if dep_module_id:
+                        module.dependencies.add(dep_module_id)
+                        names = [alias.name for alias in node.names]
+                        module.imports.append((node.module, names))
+                    else:
+                        module.external_imports.add(node.module.split('.')[0])
+                        self.external_packages.add(node.module.split('.')[0])
+                        
+    def _resolve_import(self, import_name: str, from_module: ModuleInfo) -> Optional[str]:
+        """Resolve an import to a local module ID"""
+        # Try exact match
+        if import_name in self.modules:
+            return import_name
+            
+        # Try with .__init__
+        init_id = f"{import_name}.__init__"
+        if init_id in self.modules:
+            return init_id
+            
+        # Try relative to current module's package
+        parts = from_module.module_id.split('.')
+        for i in range(len(parts), 0, -1):
+            candidate = '.'.join(parts[:i] + [import_name])
+            if candidate in self.modules:
+                return candidate
+                
+        # Try as submodule
+        for module_id in self.modules:
+            if module_id.startswith(import_name + '.'):
+                return module_id
+            if module_id.endswith('.' + import_name):
+                return module_id
+                
         return None
-    
-    def _file_to_module_id(self, file: File) -> str:
-        """Convert file path to module identifier"""
-        # Convert path like "foo/bar/baz.py" to "foo.bar.baz"
-        path = file.path
-        if path.endswith('.py'):
-            path = path[:-3]
-        if path.endswith('__init__'):
-            path = path[:-9]  # Remove __init__
-        return path.replace('/', '.').replace('\\', '.').strip('.')
-    
-    def _resolve_entry_point(self, root_path: str, entry_point: str) -> Optional[File]:
-        """Find the entry point file"""
-        entry_full = os.path.join(root_path, entry_point)
-        for file in self.project.get_files():
-            file_full = os.path.join(root_path, file.path)
-            if os.path.abspath(file_full) == os.path.abspath(entry_full):
-                return file
+        
+    def _path_to_module_id(self, rel_path: str) -> str:
+        """Convert file path to module ID"""
+        # Remove .py extension
+        if rel_path.endswith('.py'):
+            rel_path = rel_path[:-3]
+        # Convert path separators to dots
+        module_id = rel_path.replace(os.sep, '.').replace('/', '.')
+        # Handle __init__.py
+        if module_id.endswith('.__init__'):
+            module_id = module_id[:-9]
+        return module_id
+        
+    def _resolve_entry_point(self, entry_point: str) -> Optional[str]:
+        """Find the module ID for the entry point"""
+        entry_abs = os.path.abspath(os.path.join(self.root_path, entry_point))
+        for module_id, module in self.modules.items():
+            module_abs = os.path.abspath(os.path.join(self.root_path, module.path))
+            if module_abs == entry_abs:
+                return module_id
         return None
-    
-    def _collect_dependencies(self, entry_file: File) -> Set[str]:
-        """Collect all dependencies based on configuration"""
-        entry_module_id = self._file_to_module_id(entry_file)
         
-        if self.config.inclusion_mode == "minimal":
-            # Only direct dependencies
-            return self._collect_direct_dependencies(entry_module_id)
-        elif self.config.inclusion_mode == "standard":
-            # Direct + one level transitive
-            return self._collect_transitive_dependencies(entry_module_id, max_depth=2)
-        elif self.config.inclusion_mode == "complete":
-            # All local modules
-            if self.config.tree_shaking == "off":
-                # Include everything
-                return set(self.module_graph.keys())
-            else:
-                # Include all reachable
-                return self._collect_transitive_dependencies(entry_module_id, max_depth=-1)
-        elif self.config.inclusion_mode == "custom":
-            # Use whitelist/blacklist
-            included = set()
-            for module_id in self.module_graph.keys():
-                if module_id in self.config.blacklist:
-                    continue
-                if self.config.whitelist and module_id not in self.config.whitelist:
-                    continue
-                included.add(module_id)
-            return included
-        
-        return self._collect_transitive_dependencies(entry_module_id, max_depth=-1)
-    
-    def _collect_direct_dependencies(self, module_id: str) -> Set[str]:
-        """Collect only direct dependencies"""
-        if module_id not in self.module_graph:
-            return set()
-        
-        included = {module_id}
-        node = self.module_graph[module_id]
-        included.update(node.dependencies)
-        return included
-    
-    def _collect_transitive_dependencies(self, entry_module_id: str, max_depth: int = -1) -> Set[str]:
+    def _collect_transitive_dependencies(self, entry_module_id: str) -> Set[str]:
         """Collect all transitive dependencies using BFS"""
-        if entry_module_id not in self.module_graph:
-            return set()
-        
         visited = set()
-        queue = deque([(entry_module_id, 0)])
+        queue = deque([entry_module_id])
         
         while queue:
-            current_id, depth = queue.popleft()
-            
+            current_id = queue.popleft()
             if current_id in visited:
                 continue
-            
-            if max_depth >= 0 and depth > max_depth:
-                continue
-            
             visited.add(current_id)
             
-            if current_id in self.module_graph:
-                node = self.module_graph[current_id]
-                node.depth = depth
-                
-                for dep_id in node.dependencies:
+            if current_id in self.modules:
+                module = self.modules[current_id]
+                for dep_id in module.dependencies:
                     if dep_id not in visited:
-                        queue.append((dep_id, depth + 1))
-        
+                        queue.append(dep_id)
+                        
         return visited
-    
+        
     def _topological_sort(self, module_ids: Set[str]) -> List[str]:
-        """Sort modules in topological order (dependencies first)"""
-        # Build adjacency list for included modules only
+        """Sort modules in dependency order (dependencies first)"""
+        # Build graph
         graph = defaultdict(list)
         in_degree = defaultdict(int)
         
         for module_id in module_ids:
             if module_id not in in_degree:
                 in_degree[module_id] = 0
-            
-            if module_id in self.module_graph:
-                node = self.module_graph[module_id]
-                for dep_id in node.dependencies:
-                    if dep_id in module_ids:  # Only consider included modules
+            if module_id in self.modules:
+                module = self.modules[module_id]
+                for dep_id in module.dependencies:
+                    if dep_id in module_ids:
                         graph[dep_id].append(module_id)
                         in_degree[module_id] += 1
-        
+                        
         # Kahn's algorithm
         queue = deque([m for m in module_ids if in_degree[m] == 0])
         result = []
@@ -397,228 +312,141 @@ class AdvancedConsolidator:
         while queue:
             current = queue.popleft()
             result.append(current)
-            
             for neighbor in graph[current]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
-        
-        # Check for cycles
+                    
+        # Handle cycles
         if len(result) < len(module_ids):
-            logger.warning(f"Circular dependencies detected. Including remaining {len(module_ids) - len(result)} modules")
-            result.extend(m for m in module_ids if m not in result)
-        
+            remaining = module_ids - set(result)
+            logger.warning(f"Circular dependencies detected for {len(remaining)} modules")
+            result.extend(remaining)
+            
         return result
-    
-    def _generate_consolidated_code(self, ordered_modules: List[str]) -> str:
-        """Generate the consolidated code"""
+        
+    def _generate_output(self, ordered_modules: List[str]) -> str:
+        """Generate the consolidated output"""
         parts = []
         
         # Header
-        parts.append(self._generate_header())
-        parts.append("")
+        parts.append('"""')
+        parts.append('Consolidated Standalone Python File')
+        parts.append('Generated by Standalone Consolidation Tool')
+        parts.append('')
+        parts.append(f'Total modules: {len(ordered_modules)}')
+        parts.append(f'External packages: {len(self.external_packages)}')
+        parts.append('')
+        if self.external_packages:
+            parts.append('Required external packages:')
+            for pkg in sorted(self.external_packages):
+                parts.append(f'  - {pkg}')
+            parts.append('')
+            parts.append('Install with:')
+            parts.append(f'  pip install {" ".join(sorted(self.external_packages))}')
+        parts.append('"""')
+        parts.append('')
         
         # External imports
-        parts.append("# ===== EXTERNAL IMPORTS =====")
-        external_imports = self._collect_external_imports(ordered_modules)
-        parts.extend(sorted(external_imports))
-        parts.append("")
-        
+        if self.external_packages:
+            parts.append('# ===== EXTERNAL IMPORTS =====')
+            external_imports = set()
+            for module_id in ordered_modules:
+                if module_id in self.modules:
+                    module = self.modules[module_id]
+                    for ext in module.external_imports:
+                        external_imports.add(f"import {ext}")
+            parts.extend(sorted(external_imports))
+            parts.append('')
+            
         # Module code
-        parts.append("# ===== MODULE CODE =====")
+        parts.append('# ===== MODULE CODE =====')
+        parts.append('')
+        
         for module_id in ordered_modules:
-            if module_id in self.module_graph:
-                node = self.module_graph[module_id]
-                module_code = self._generate_module_code(node)
-                if module_code:
-                    parts.append(f"# ----- Module: {module_id} -----")
-                    parts.append(module_code)
-                    parts.append("")
+            if module_id in self.modules:
+                module = self.modules[module_id]
+                parts.append(f'# ----- Module: {module_id} ({module.path}) -----')
+                
+                # Remove local imports from code
+                cleaned_code = self._remove_local_imports(module)
+                parts.append(cleaned_code)
+                parts.append('')
+                
+        return '\n'.join(parts)
         
-        # Footer
-        parts.append(self._generate_footer())
-        
-        return "\n".join(parts)
-    
-    def _generate_header(self) -> str:
-        """Generate file header with metadata"""
-        return f'''"""
-Consolidated Standalone Code
-Generated by Advanced Consolidation Tool
-
-Config:
-  - Inclusion mode: {self.config.inclusion_mode}
-  - Tree shaking: {self.config.tree_shaking}
-  - Total files: {self.stats['total_files']}
-  - Included files: {self.stats['included_files']}
-  - External packages: {len(self.external_packages)}
-
-External dependencies required:
-{chr(10).join(f"  - {pkg}" for pkg in sorted(self.external_packages))}
-
-Usage:
-  This is a standalone file containing all necessary local code.
-  Install external dependencies first:
-    pip install {' '.join(sorted(self.external_packages))}
-"""'''
-    
-    def _generate_footer(self) -> str:
-        """Generate file footer"""
-        return f'''
-# ===== END OF CONSOLIDATED CODE =====
-# Statistics:
-#   Total modules: {self.stats['included_files']}
-#   External packages: {len(self.external_packages)}
-#   Dynamic imports detected: {self.stats['dynamic_imports']}
-#   Conditional imports detected: {self.stats['conditional_imports']}
-'''
-    
-    def _collect_external_imports(self, module_ids: List[str]) -> Set[str]:
-        """Collect all external import statements"""
-        imports = set()
-        
-        for module_id in module_ids:
-            if module_id in self.module_graph:
-                node = self.module_graph[module_id]
-                for external in node.external_imports:
-                    imports.add(f"import {external}")
-        
-        return imports
-    
-    def _generate_module_code(self, node: ModuleNode) -> str:
-        """Generate code for a single module"""
-        file = node.file
-        
-        # Get the full file content
-        try:
-            file_path = os.path.join(self.project.root_path, file.path)
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+    def _remove_local_imports(self, module: ModuleInfo) -> str:
+        """Remove imports of local modules that are included in consolidation"""
+        if not module.ast_tree:
+            return module.code
             
-            # Remove local imports (already handled globally)
-            content = self._remove_local_imports(content, node)
-            
-            # Apply config filters
-            if not self.config.include_docstrings:
-                content = self._remove_docstrings(content)
-            
-            if not self.config.include_comments:
-                content = self._remove_comments(content)
-            
-            return content.strip()
-            
-        except Exception as e:
-            logger.warning(f"Could not read {file.path}: {e}")
-            return ""
-    
-    def _remove_local_imports(self, content: str, node: ModuleNode) -> str:
-        """Remove local imports that are included in consolidation"""
-        lines = content.split('\n')
-        filtered_lines = []
+        lines = module.code.split('\n')
+        keep_lines = []
         
-        for line in lines:
-            # Check if it's an import line
-            is_local_import = False
-            for import_stmt in node.import_statements:
-                if import_stmt.module_name:
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Check if this is an import line that we should remove
+            should_remove = False
+            
+            # Check against module's known local imports
+            for import_module, names in module.imports:
+                if import_module:
                     # from X import Y
-                    if self._resolve_local_import(import_stmt.module_name, node.file):
-                        if f"from {import_stmt.module_name}" in line:
-                            is_local_import = True
-                            break
+                    if f"from {import_module}" in stripped:
+                        should_remove = True
+                        break
                 else:
                     # import X
-                    for name in import_stmt.names:
-                        if self._resolve_local_import(name, node.file):
-                            if f"import {name}" in line:
-                                is_local_import = True
-                                break
-            
-            if not is_local_import:
-                filtered_lines.append(line)
+                    for name in names:
+                        if f"import {name}" in stripped and name in self.modules:
+                            should_remove = True
+                            break
+                            
+            if not should_remove:
+                keep_lines.append(line)
+                
+        return '\n'.join(keep_lines)
         
-        return '\n'.join(filtered_lines)
-    
-    def _remove_docstrings(self, content: str) -> str:
-        """Remove docstrings from code"""
-        try:
-            tree = ast.parse(content)
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module)):
-                    if (ast.get_docstring(node)):
-                        # Keep first line only
-                        pass  # TODO: implement
-            return content
-        except:
-            return content
-    
-    def _remove_comments(self, content: str) -> str:
-        """Remove comments from code"""
-        lines = content.split('\n')
-        filtered = []
-        for line in lines:
-            # Remove inline comments
-            if '#' in line:
-                # Keep if # is in a string
-                in_string = False
-                quote_char = None
-                for i, char in enumerate(line):
-                    if char in ['"', "'"]:
-                        if not in_string:
-                            in_string = True
-                            quote_char = char
-                        elif char == quote_char and (i == 0 or line[i-1] != '\\'):
-                            in_string = False
-                    elif char == '#' and not in_string:
-                        line = line[:i].rstrip()
-                        break
-            if line.strip():  # Keep non-empty lines
-                filtered.append(line)
-        return '\n'.join(filtered)
-    
     def _write_output(self, output_path: str, content: str) -> None:
-        """Write consolidated code to output file"""
+        """Write output and report"""
+        # Write consolidated file
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
-    
-    def _generate_report(self, output_path: str) -> None:
-        """Generate consolidation report"""
+            
+        # Write report
         report = {
-            'config': {
-                'inclusion_mode': self.config.inclusion_mode,
-                'tree_shaking': self.config.tree_shaking,
-                'include_docstrings': self.config.include_docstrings,
-                'include_comments': self.config.include_comments,
-            },
             'stats': self.stats,
             'external_packages': sorted(self.external_packages),
-            'module_graph_size': len(self.module_graph),
-            'output_file': output_path
+            'output_file': output_path,
+            'output_size': len(content)
         }
         
         report_path = output_path.replace('.py', '_report.json')
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
-        
-        logger.info(f"Report saved to {report_path}")
+            
+    def _validate_syntax(self, code: str) -> bool:
+        """Validate Python syntax"""
+        try:
+            ast.parse(code)
+            return True
+        except SyntaxError as e:
+            logger.error(f"Syntax error at line {e.lineno}: {e.msg}")
+            return False
 
 
 def main():
-    """Main entry point"""
     parser = argparse.ArgumentParser(
-        description='Advanced Code Consolidation Tool',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='Standalone Code Consolidation Tool (No External Dependencies)',
         epilog='''
 Examples:
-  # Complete consolidation (all local modules)
-  %(prog)s /path/to/project --entry-point main.py --output standalone.py --mode complete
+  # Complete consolidation
+  %(prog)s /path/to/project --entry-point main.py --output standalone.py
   
-  # Minimal consolidation (direct dependencies only)
-  %(prog)s /path/to/project --entry-point main.py --output standalone.py --mode minimal
-  
-  # Standard consolidation with moderate tree-shaking
-  %(prog)s /path/to/project --entry-point main.py --output standalone.py --mode standard --tree-shaking moderate
+  # Reachable only
+  %(prog)s /path/to/project --entry-point main.py --output standalone.py --mode reachable
 '''
     )
     
@@ -626,38 +454,26 @@ Examples:
     parser.add_argument('--entry-point', '-e', required=True, help='Entry point file (relative to root)')
     parser.add_argument('--output', '-o', required=True, help='Output file path')
     parser.add_argument('--mode', '-m', default='complete',
-                       choices=['minimal', 'standard', 'complete', 'custom'],
-                       help='Inclusion mode (default: complete)')
-    parser.add_argument('--tree-shaking', default='off',
-                       choices=['off', 'conservative', 'moderate', 'aggressive'],
-                       help='Tree-shaking mode (default: off)')
-    parser.add_argument('--max-depth', type=int, default=-1,
-                       help='Maximum dependency depth (-1 for unlimited)')
-    parser.add_argument('--whitelist', nargs='+', help='Modules to always include')
-    parser.add_argument('--blacklist', nargs='+', help='Modules to exclude')
-    parser.add_argument('--no-docstrings', action='store_true', help='Remove docstrings')
-    parser.add_argument('--no-comments', action='store_true', help='Remove comments')
-    parser.add_argument('--no-type-hints', action='store_true', help='Remove type hints')
-    parser.add_argument('--external-stubs', action='store_true', default=True,
-                       help='Generate stubs for external packages')
-    parser.add_argument('--preserve-structure', action='store_true', default=True,
-                       help='Preserve module structure with comments')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
+                       choices=['complete', 'reachable'],
+                       help='Inclusion mode: complete (all modules) or reachable (from entry)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     
     args = parser.parse_args()
     
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    config = ConsolidationConfig.from_args(args)
-    consolidator = AdvancedConsolidator(config)
+    consolidator = StandaloneConsolidator(args.root_path)
     
     try:
         consolidator.consolidate(
-            root_path=args.root_path,
             entry_point=args.entry_point,
-            output_path=args.output
+            output_path=args.output,
+            mode=args.mode
         )
+        print(f"\n✓ Success! Output written to: {args.output}")
+        print(f"  Size: {os.path.getsize(args.output):,} bytes")
+        
     except Exception as e:
         logger.error(f"Consolidation failed: {e}")
         if args.verbose:
@@ -668,4 +484,3 @@ Examples:
 
 if __name__ == '__main__':
     main()
-
