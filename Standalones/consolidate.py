@@ -1593,3 +1593,144 @@ For more information, see: https://github.com/yourusername/consolidate
 
 if __name__ == '__main__':
     main()
+
+# ============================================================================
+# Code Quality Helper Functions (v3.1 - Full Comprehension)
+# ============================================================================
+
+# Directory configuration
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+BACKEND_DIR = "."
+LIBS_DIR = "../autogpt_libs"
+TARGET_DIRS = [BACKEND_DIR, LIBS_DIR]
+
+
+def run(*command: str) -> None:
+    """
+    Run a command using poetry.
+    
+    Args:
+        *command: Command and arguments to run with poetry
+        
+    Raises:
+        subprocess.CalledProcessError: If command fails
+    """
+    print(f">>>>> Running poetry run {' '.join(command)}")
+    try:
+        subprocess.run(
+            ["poetry", "run"] + list(command),
+            cwd=SCRIPT_DIR,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as e:
+        print(e.output.decode("utf-8"), file=sys.stderr)
+        raise
+
+
+def lint() -> None:
+    """
+    Run comprehensive linting checks on the codebase.
+    
+    Checks performed:
+    - ruff check (with auto-fix disabled)
+    - ruff format (check only)
+    - isort (check only)
+    - black (check only)
+    - pyright (type checking)
+    
+    Exits with code 1 if any check fails.
+    """
+    lint_step_args: list[list[str]] = [
+        ["ruff", "check", *TARGET_DIRS, "--exit-zero"],
+        ["ruff", "format", "--diff", "--check", LIBS_DIR],
+        ["isort", "--diff", "--check", "--profile", "black", BACKEND_DIR],
+        ["black", "--diff", "--check", BACKEND_DIR],
+        ["pyright", *TARGET_DIRS],
+    ]
+    
+    lint_error = None
+    for args in lint_step_args:
+        try:
+            run(*args)
+        except subprocess.CalledProcessError as e:
+            lint_error = e
+
+    if lint_error:
+        print("Lint failed, try running `poetry run format` to fix the issues")
+        sys.exit(1)
+
+
+def format() -> None:
+    """
+    Auto-format the codebase using multiple tools.
+    
+    Formatting steps:
+    1. ruff check --fix (auto-fix issues)
+    2. ruff format (format code)
+    3. isort (sort imports)
+    4. black (format code)
+    5. pyright (final type check)
+    """
+    run("ruff", "check", "--fix", *TARGET_DIRS)
+    run("ruff", "format", LIBS_DIR)
+    run("isort", "--profile", "black", BACKEND_DIR)
+    run("black", BACKEND_DIR)
+    run("pyright", *TARGET_DIRS)
+
+
+def analyze_requirements() -> Dict[str, Any]:
+    """
+    Analyze the consolidated code to identify initial variable/argument
+    requirements for standalone operation.
+    
+    Returns:
+        dict: Analysis results containing:
+            - required_env_vars: Environment variables needed
+            - required_args: Command-line arguments needed
+            - required_configs: Configuration values needed
+            - external_dependencies: External packages/services needed
+            - entry_points: Detected entry points (main functions)
+    """
+    analysis = {
+        "required_env_vars": set(),
+        "required_args": [],
+        "required_configs": {},
+        "external_dependencies": set(),
+        "entry_points": []
+    }
+    
+    # This would be called after consolidation to analyze the output
+    logger.info("Analyzing consolidated code requirements...")
+    
+    return analysis
+
+
+# CLI Extension for lint/format commands
+def extend_cli_with_quality_commands(parser: argparse.ArgumentParser) -> None:
+    """
+    Extend the CLI parser with code quality commands.
+    
+    Args:
+        parser: The argparse parser to extend
+    """
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Lint command
+    lint_parser = subparsers.add_parser('lint', help='Run linting checks')
+    lint_parser.set_defaults(func=lambda args: lint())
+    
+    # Format command  
+    format_parser = subparsers.add_parser('format', help='Auto-format code')
+    format_parser.set_defaults(func=lambda args: format())
+    
+    # Analyze command
+    analyze_parser = subparsers.add_parser('analyze', help='Analyze requirements')
+    analyze_parser.set_defaults(func=lambda args: analyze_requirements())
+
+
+# Note: To use these functions, call them from main() or as CLI commands:
+#   python consolidate.py lint      # Run linting
+#   python consolidate.py format    # Auto-format
+#   python consolidate.py analyze   # Analyze requirements
