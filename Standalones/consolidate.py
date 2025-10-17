@@ -563,31 +563,28 @@ class ImportProcessor:
                 i += 1
                 continue
                 
-            # Process import lines
+            # Process import lines at ANY indentation level
             if stripped.startswith('import ') or stripped.startswith('from '):
-                # Only extract top-level imports (indent_level == 0)
-                # Imports inside functions/classes should be left in place
-                if indent_level == 0:
-                    import_stmt = self.parse_import_line(line)
-                    
-                    if import_stmt:
-                        if import_stmt.import_type == ImportType.LOCAL:
-                            # COMPLETELY REMOVE local imports - they're being inlined
-                            pass  # Don't add to processed_lines
-                        else:
-                            # Collect external/stdlib imports - will be consolidated at top
-                            file_imports.add(import_stmt)
-                            # Don't add to processed_lines - imports go to top
-                            # Will check for empty blocks later
+                import_stmt = self.parse_import_line(line)
+                
+                if import_stmt:
+                    if import_stmt.import_type == ImportType.LOCAL:
+                        # COMPLETELY REMOVE local imports at ANY level - they're being inlined
+                        # This includes imports inside functions!
+                        pass  # Don't add to processed_lines
                     else:
-                        # Couldn't parse or relative import
-                        if stripped.startswith('from .'):
-                            processed_lines.append(f'# {line}  # Relative import removed')
-                        else:
-                            processed_lines.append(line)
+                        # Collect external/stdlib imports - will be consolidated at top
+                        # This applies to ALL imports, including those inside functions
+                        file_imports.add(import_stmt)
+                        # Don't add to processed_lines - imports go to top
                 else:
-                    # Import inside a function/class - keep it
-                    processed_lines.append(line)
+                    # Couldn't parse or relative import
+                    if stripped.startswith('from .'):
+                        # Comment out relative imports
+                        processed_lines.append(f'# {line}  # Relative import removed')
+                    else:
+                        # Keep unparseable import statements
+                        processed_lines.append(line)
             else:
                 processed_lines.append(line)
                 
@@ -603,7 +600,7 @@ class ImportProcessor:
             stripped = line.strip()
             
             # ONLY handle these specific keywords that MUST have a body
-            keywords_needing_body = ['try:', 'except:', 'except ', 'else:', 'elif ', 'finally:', 'with ', 'if ', 'for ', 'while ']
+            keywords_needing_body = ['def ', 'class ', 'try:', 'except:', 'except ', 'else:', 'elif ', 'finally:', 'with ', 'if ', 'for ', 'while ']
             is_special_block = any(stripped.startswith(kw) or stripped == kw.rstrip() for kw in keywords_needing_body)
             
             # Check if line ends with : (ignoring trailing comments)

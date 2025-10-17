@@ -7,7 +7,7 @@ All dependencies have been recursively inlined.
 This file is completely self-contained.
 
 Original location: /tmp/gpt_academic_fresh
-Generated: 2025-10-17 13:04:22
+Generated: 2025-10-17 13:56:32
 Modules included: 1
 """
 
@@ -41,6 +41,8 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.live import Live
 from rich.markdown import Markdown
+from selenium import webdriver
+from selenium.webdriver.common.by import By
 
 
 # ============================================================================
@@ -926,8 +928,6 @@ class Cookie:
 
     @classmethod
     def fetch_default(cls, path=None):
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
 
         driver = webdriver.Edge()
         driver.get("https://bing.com/chat")

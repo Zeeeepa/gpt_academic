@@ -7,7 +7,7 @@ All dependencies have been recursively inlined.
 This file is completely self-contained.
 
 Original location: /tmp/gpt_academic_fresh
-Generated: 2025-10-17 13:04:21
+Generated: 2025-10-17 13:56:25
 Modules included: 25
 """
 
@@ -17,8 +17,10 @@ import base64
 import copy
 import glob
 import gzip
+import hashlib
 import html
 import importlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -28,20 +30,29 @@ import multiprocessing
 import os
 import pickle
 import platform
+import posixpath
 import queue
 import random
 import re
 import requests
 import shutil
+import site
+import socket
 import subprocess
+import sys
+import tarfile
+import tempfile
 import threading
 import time
 import traceback
 import uuid
+import wave
+import zipfile
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
@@ -66,15 +77,31 @@ from urllib.parse import urlparse
 
 # External Package Imports
 # ============================================================================
-import gradio
+import PyPDF2
+import edge_tts
+import fastapi
+import fitz
+import gradio as gr
+import httpx
 import markdown
+import numpy as np
+import py7zr
+import rarfile
+import rarfile  # 用来检查rarfile是否安装，不要删除
 import tiktoken
 import trafilatura
 import uvicorn
 
+from colorama import init
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse, RedirectResponse
+from gradio.routes import App
 from latex2mathml.converter import convert as tex2mathml
+from llama_index.core import SimpleDirectoryReader
 from loguru import logger
+from pydub import AudioSegment
 from pymdownx.superfences import fence_code_format
+from starlette.responses import JSONResponse, Response
 
 
 # ============================================================================
@@ -91,7 +118,6 @@ from pymdownx.superfences import fence_code_format
 if platform.system()=="Linux":
     pass
 else:
-    from colorama import init
     init()
 
 # Do you like the elegance of Chinese characters?
@@ -175,6 +201,183 @@ def log亮靛(*kw,**kargs):
 
 
 # ----------------------------------------------------------------------
+# MODULE: core_functional
+# SOURCE: core_functional.py
+# ----------------------------------------------------------------------
+
+# 'primary' 颜色对应 theme.py 中的 primary_hue
+# 'secondary' 颜色对应 theme.py 中的 neutral_hue
+# 'stop' 颜色对应 theme.py 中的 color_er
+
+def get_core_functions():
+    return {
+
+        "学术语料润色": {
+            # [1*] 前缀字符串，会被加在你的输入之前。例如，用来描述你的要求，例如翻译、解释代码、润色等等。
+            #      这里填一个提示词字符串就行了，这里为了区分中英文情景搞复杂了一点
+            "Prefix":   build_gpt_academic_masked_string_langbased(
+                            text_show_english=
+                                r"Below is a paragraph from an academic paper. Polish the writing to meet the academic style, "
+                                r"improve the spelling, grammar, clarity, concision and overall readability. When necessary, rewrite the whole sentence. "
+                                r"Firstly, you should provide the polished paragraph (in English). "
+                                r"Secondly, you should list all your modification and explain the reasons to do so in markdown table.",
+                            text_show_chinese=
+                                r"作为一名中文学术论文写作改进助理，你的任务是改进所提供文本的拼写、语法、清晰、简洁和整体可读性，"
+                                r"同时分解长句，减少重复，并提供改进建议。请先提供文本的更正版本，然后在markdown表格中列出修改的内容，并给出修改的理由:"
+                        ) + "\n\n",
+            # [2*] 后缀字符串，会被加在你的输入之后。例如，配合前缀可以把你的输入内容用引号圈起来
+            "Suffix":   r"",
+            # [3] 按钮颜色 (可选参数，默认 secondary)
+            "Color":    r"secondary",
+            # [4] 按钮是否可见 (可选参数，默认 True，即可见)
+            "Visible": True,
+            # [5] 是否在触发时清除历史 (可选参数，默认 False，即不处理之前的对话历史)
+            "AutoClearHistory": False,
+            # [6] 文本预处理 （可选参数，默认 None，举例：写个函数移除所有的换行符）
+            "PreProcess": None,
+            # [7] 模型选择 （可选参数。如不设置，则使用当前全局模型；如设置，则用指定模型覆盖全局模型。）
+            # "ModelOverride": "gpt-3.5-turbo", # 主要用途：强制点击此基础功能按钮时，使用指定的模型。
+        },
+
+
+        "总结绘制脑图": {
+            # 前缀，会被加在你的输入之前。例如，用来描述你的要求，例如翻译、解释代码、润色等等
+            "Prefix":   '''"""\n\n''',
+            # 后缀，会被加在你的输入之后。例如，配合前缀可以把你的输入内容用引号圈起来
+            "Suffix":
+                # dedent() 函数用于去除多行字符串的缩进
+                dedent("\n\n"+r'''
+                    """
+
+                    使用mermaid flowchart对以上文本进行总结，概括上述段落的内容以及内在逻辑关系，例如：
+
+                    以下是对以上文本的总结，以mermaid flowchart的形式展示：
+                    ```mermaid
+                    flowchart LR
+                        A["节点名1"] --> B("节点名2")
+                        B --> C{"节点名3"}
+                        C --> D["节点名4"]
+                        C --> |"箭头名1"| E["节点名5"]
+                        C --> |"箭头名2"| F["节点名6"]
+                    ```
+
+                    注意：
+                    （1）使用中文
+                    （2）节点名字使用引号包裹，如["Laptop"]
+                    （3）`|` 和 `"`之间不要存在空格
+                    （4）根据情况选择flowchart LR（从左到右）或者flowchart TD（从上到下）
+                '''),
+        },
+
+
+        "查找语法错误": {
+            "Prefix":   r"Help me ensure that the grammar and the spelling is correct. "
+                        r"Do not try to polish the text, if no mistake is found, tell me that this paragraph is good. "
+                        r"If you find grammar or spelling mistakes, please list mistakes you find in a two-column markdown table, "
+                        r"put the original text the first column, "
+                        r"put the corrected text in the second column and highlight the key words you fixed. "
+                        r"Finally, please provide the proofreaded text.""\n\n"
+                        r"Example:""\n"
+                        r"Paragraph: How is you? Do you knows what is it?""\n"
+                        r"| Original sentence | Corrected sentence |""\n"
+                        r"| :--- | :--- |""\n"
+                        r"| How **is** you? | How **are** you? |""\n"
+                        r"| Do you **knows** what **is** **it**? | Do you **know** what **it** **is** ? |""\n\n"
+                        r"Below is a paragraph from an academic paper. "
+                        r"You need to report all grammar and spelling mistakes as the example before."
+                        + "\n\n",
+            "Suffix":   r"",
+            "PreProcess": clear_line_break,    # 预处理：清除换行符
+        },
+
+
+        "中译英": {
+            "Prefix":   r"Please translate following sentence to English:" + "\n\n",
+            "Suffix":   r"",
+        },
+
+
+        "学术英中互译": {
+            "Prefix":   build_gpt_academic_masked_string_langbased(
+                            text_show_chinese=
+                                r"I want you to act as a scientific English-Chinese translator, "
+                                r"I will provide you with some paragraphs in one language "
+                                r"and your task is to accurately and academically translate the paragraphs only into the other language. "
+                                r"Do not repeat the original provided paragraphs after translation. "
+                                r"You should use artificial intelligence tools, "
+                                r"such as natural language processing, and rhetorical knowledge "
+                                r"and experience about effective writing techniques to reply. "
+                                r"I'll give you my paragraphs as follows, tell me what language it is written in, and then translate:",
+                            text_show_english=
+                                r"你是经验丰富的翻译，请把以下学术文章段落翻译成中文，"
+                                r"并同时充分考虑中文的语法、清晰、简洁和整体可读性，"
+                                r"必要时，你可以修改整个句子的顺序以确保翻译后的段落符合中文的语言习惯。"
+                                r"你需要翻译的文本如下："
+                        ) + "\n\n",
+            "Suffix":   r"",
+        },
+
+
+        "英译中": {
+            "Prefix":   r"翻译成地道的中文：" + "\n\n",
+            "Suffix":   r"",
+            "Visible":  False,
+        },
+
+
+        "找图片": {
+            "Prefix":   r"我需要你找一张网络图片。使用Unsplash API(https://source.unsplash.com/960x640/?<英语关键词>)获取图片URL，"
+                        r"然后请使用Markdown格式封装，并且不要有反斜线，不要用代码块。现在，请按以下描述给我发送图片：" + "\n\n",
+            "Suffix":   r"",
+            "Visible":  False,
+        },
+
+
+        "解释代码": {
+            "Prefix":   r"请解释以下代码：" + "\n```\n",
+            "Suffix":   "\n```\n",
+        },
+
+
+        "参考文献转Bib": {
+            "Prefix":   r"Here are some bibliography items, please transform them into bibtex style."
+                        r"Note that, reference styles maybe more than one kind, you should transform each item correctly."
+                        r"Items need to be transformed:" + "\n\n",
+            "Visible":  False,
+            "Suffix":   r"",
+        }
+    }
+
+
+def handle_core_functionality(additional_fn, inputs, history, chatbot):
+    import core_functional
+    importlib.reload(core_functional)    # 热更新prompt
+    core_functional = core_functional.get_core_functions()
+    addition = chatbot._cookies['customize_fn_overwrite']
+    if additional_fn in addition:
+        # 自定义功能
+        inputs = addition[additional_fn]["Prefix"] + inputs + addition[additional_fn]["Suffix"]
+        return inputs, history
+    else:
+        # 预制功能
+        if "PreProcess" in core_functional[additional_fn]:
+            if core_functional[additional_fn]["PreProcess"] is not None:
+                inputs = core_functional[additional_fn]["PreProcess"](inputs)  # 获取预处理函数（如果有的话）
+        # 为字符串加上上面定义的前缀和后缀。
+        inputs = apply_gpt_academic_string_mask_langbased(
+            string = core_functional[additional_fn]["Prefix"] + inputs + core_functional[additional_fn]["Suffix"],
+            lang_reference = inputs,
+        )
+        if core_functional[additional_fn].get("AutoClearHistory", False):
+            history = []
+        return inputs, history
+
+if __name__ == "__main__":
+    t = get_core_functions()["总结绘制脑图"]
+    print(t["Prefix"] + t["Suffix"])
+
+
+# ----------------------------------------------------------------------
 # MODULE: themes.theme
 # SOURCE: themes/theme.py
 # ----------------------------------------------------------------------
@@ -185,23 +388,23 @@ def log亮靛(*kw,**kargs):
 def load_dynamic_theme(THEME):
     adjust_dynamic_theme = None
     if THEME == "Chuanhu-Small-and-Beautiful":
-        from .green import adjust_theme, advanced_css
+#         from .green import adjust_theme, advanced_css  # Relative import removed
 
         theme_declaration = (
             '<h2 align="center"  class="small">[Chuanhu-Small-and-Beautiful主题]</h2>'
         )
     elif THEME == "High-Contrast":
-        from .contrast import adjust_theme, advanced_css
+#         from .contrast import adjust_theme, advanced_css  # Relative import removed
 
         theme_declaration = ""
     elif "/" in THEME:
-        from .gradios import adjust_theme, advanced_css
-        from .gradios import dynamic_set_theme
+#         from .gradios import adjust_theme, advanced_css  # Relative import removed
+#         from .gradios import dynamic_set_theme  # Relative import removed
 
         adjust_dynamic_theme = dynamic_set_theme(THEME)
         theme_declaration = ""
     else:
-        from .default import adjust_theme, advanced_css
+#         from .default import adjust_theme, advanced_css  # Relative import removed
 
         theme_declaration = ""
     return adjust_theme, advanced_css, theme_declaration, adjust_dynamic_theme
@@ -693,7 +896,6 @@ def markdown_convertion_for_file(txt):
     """
     将Markdown格式的文本转换为HTML格式。如果包含数学公式，则先将公式转换为HTML格式。
     """
-    from themes.theme import advanced_css
     pre = f"""
     <!DOCTYPE html><head><meta charset="utf-8"><title>GPT-Academic输出文档</title><style>{advanced_css}</style></head>
     <body>
@@ -878,7 +1080,6 @@ def special_render_issues_for_mermaid(text):
     # 我不希望"总结绘制脑图"prompt中的mermaid渲染出来
     @lru_cache(maxsize=1)
     def get_special_case():
-        from core_functional import get_core_functions
         special_case = get_core_functions()["总结绘制脑图"]["Suffix"]
         return special_case
     if text.endswith(get_special_case()): text = text.replace("```mermaid", "```")
@@ -1051,7 +1252,6 @@ def is_o_family_for_openai(llm_model):
     return False
 
 def select_api_key(keys, llm_model):
-    import random
     avail_key_list = []
     key_list = keys.split(',')
 
@@ -1084,7 +1284,6 @@ def select_api_key(keys, llm_model):
 
 
 def select_api_key_for_embed_models(keys, llm_model):
-    import random
     avail_key_list = []
     key_list = keys.split(',')
 
@@ -1165,7 +1364,6 @@ def read_env_variable(arg, default_value):
 
 @lru_cache(maxsize=128)
 def read_single_conf_with_lru_cache(arg):
-    from shared_utils.key_pattern_manager import is_any_api_key
     try:
         # 优先级1. 获取环境变量作为配置
         default_ref = getattr(importlib.import_module('config'), arg) # 读取默认值作为数据类型转换的参考
@@ -1220,7 +1418,6 @@ def get_conf(*args):
 
 
 def set_conf(key, value):
-    from toolbox import read_single_conf_with_lru_cache
     read_single_conf_with_lru_cache.cache_clear()
     get_conf.cache_clear()
     os.environ[key] = str(value)
@@ -1277,7 +1474,6 @@ def zip_extract_member_new(self, member, targetpath, pwd):
     """Extract the ZipInfo object 'member' to a physical
         file on the path targetpath.
     """
-    import zipfile
     if not isinstance(member, zipfile.ZipInfo):
         member = self.getinfo(member)
 
@@ -1319,8 +1515,6 @@ def zip_extract_member_new(self, member, targetpath, pwd):
 
 
 def safe_extract_rar(file_path, dest_dir):
-    import rarfile
-    import posixpath
     with rarfile.RarFile(file_path) as rf:
         os.makedirs(dest_dir, exist_ok=True)
         base_path = os.path.abspath(dest_dir)
@@ -1343,9 +1537,6 @@ def safe_extract_rar(file_path, dest_dir):
 
 
 def extract_archive(file_path, dest_dir):
-    import zipfile
-    import tarfile
-    import os
 
     # Get the file extension of the input file
     file_extension = os.path.splitext(file_path)[1]
@@ -1375,7 +1566,6 @@ def extract_archive(file_path, dest_dir):
         except tarfile.ReadError as e:
             if file_extension == ".gz":
                 # 一些特别奇葩的项目，是一个gz文件，里面不是tar，只有一个tex文件
-                import gzip
                 with gzip.open(file_path, 'rb') as f_in:
                     with open(os.path.join(dest_dir, 'main.tex'), 'wb') as f_out:
                         f_out.write(f_in.read())
@@ -1386,7 +1576,6 @@ def extract_archive(file_path, dest_dir):
     # 此外，Windows上还需要安装winrar软件，配置其Path环境变量，如"C:\Program Files\WinRAR"才可以
     elif file_extension == ".rar":
         try:
-            import rarfile  # 用来检查rarfile是否安装，不要删除
             safe_extract_rar(file_path, dest_dir)
         except:
             logger.info("Rar format requires additional dependencies to install")
@@ -1395,7 +1584,6 @@ def extract_archive(file_path, dest_dir):
     # 第三方库，需要预先pip install py7zr
     elif file_extension == ".7z":
         try:
-            import py7zr
 
             with py7zr.SevenZipFile(file_path, mode="r") as f:
                 f.extractall(path=dest_dir)
@@ -1478,7 +1666,6 @@ def convert_to_markdown(file_path: str) -> str:
 
 # 修改后的 extract_text 函数，结合 SimpleDirectoryReader 和自定义解析逻辑
 def extract_text(file_path):
-    from llama_index.core import SimpleDirectoryReader
     _, ext = os.path.splitext(file_path.lower())
 
     # 使用 SimpleDirectoryReader 处理它支持的文件格式
@@ -1505,8 +1692,6 @@ def extract_text(file_path):
 
 
 def validate_path_safety(path_or_url, user):
-    from toolbox import get_conf, default_user_name
-    from toolbox import FriendlyException
     PATH_PRIVATE_UPLOAD, PATH_LOGGING = get_conf('PATH_PRIVATE_UPLOAD', 'PATH_LOGGING')
     sensitive_path = None
     path_or_url = os.path.relpath(path_or_url)
@@ -1527,7 +1712,6 @@ def validate_path_safety(path_or_url, user):
     return True
 
 def _authorize_user(path_or_url, request, gradio_app):
-    from toolbox import get_conf, default_user_name
     PATH_PRIVATE_UPLOAD, PATH_LOGGING = get_conf('PATH_PRIVATE_UPLOAD', 'PATH_LOGGING')
     sensitive_path = None
     path_or_url = os.path.relpath(path_or_url)
@@ -1564,12 +1748,6 @@ class Server(uvicorn.Server):
 
 
 def start_app(app_block, CONCURRENT_COUNT, AUTHENTICATION, PORT, SSL_KEYFILE, SSL_CERTFILE):
-    import uvicorn
-    import fastapi
-    import gradio as gr
-    from fastapi import FastAPI
-    from gradio.routes import App
-    from toolbox import get_conf
     CUSTOM_PATH, PATH_LOGGING = get_conf('CUSTOM_PATH', 'PATH_LOGGING')
 
     # --- --- configurate gradio app block --- ---
@@ -1622,8 +1800,6 @@ def start_app(app_block, CONCURRENT_COUNT, AUTHENTICATION, PORT, SSL_KEYFILE, SS
                 return "非法路径!"
             return await endpoint(path_or_url, request)
 
-        from fastapi import Request, status
-        from fastapi.responses import FileResponse, RedirectResponse
         @gradio_app.get("/academic_logout")
         async def logout():
             response = RedirectResponse(url=CUSTOM_PATH, status_code=status.HTTP_302_FOUND)
@@ -1655,19 +1831,11 @@ def start_app(app_block, CONCURRENT_COUNT, AUTHENTICATION, PORT, SSL_KEYFILE, SS
     TTS_TYPE = get_conf("TTS_TYPE")
     if TTS_TYPE != "DISABLE":
         # audio generation functionality
-        import httpx
-        from fastapi import FastAPI, Request, HTTPException
-        from starlette.responses import Response
         async def forward_request(request: Request, method: str) -> Response:
             async with httpx.AsyncClient() as client:
                 try:
                     # Forward the request to the target service
                     if TTS_TYPE == "EDGE_TTS":
-                        import tempfile
-                        import edge_tts
-                        import wave
-                        import uuid
-                        from pydub import AudioSegment
                         json = await request.json()
                         voice = get_conf("EDGE_TTS_VOICE")
                         tts = edge_tts.Communicate(text=json['text'], voice=voice)
@@ -1697,7 +1865,6 @@ def start_app(app_block, CONCURRENT_COUNT, AUTHENTICATION, PORT, SSL_KEYFILE, SS
             return await forward_request(request, "POST")
 
     # --- --- app_lifespan --- ---
-    from contextlib import asynccontextmanager
     @asynccontextmanager
     async def app_lifespan(app):
         async def startup_gradio_app():
@@ -1714,9 +1881,7 @@ def start_app(app_block, CONCURRENT_COUNT, AUTHENTICATION, PORT, SSL_KEYFILE, SS
     fastapi_app.mount(CUSTOM_PATH, gradio_app)
 
     # --- --- favicon and block fastapi api reference routes --- ---
-    from starlette.responses import JSONResponse
     if CUSTOM_PATH != '/':
-        from fastapi.responses import FileResponse
         @fastapi_app.get("/favicon.ico")
         async def favicon():
             return FileResponse(app_block.favicon_path)
@@ -2692,15 +2857,12 @@ def start_with_url(inputs:str):
         words = text.split()
         if len(words) != 1:
             return False
-        from urllib.parse import urlparse
         result = urlparse(text)
         return all([result.scheme, result.netloc])
     except:
         return False
 
 def load_web_content(inputs:str, chatbot_with_cookie, history:list):
-    from crazy_functions.doc_fns.read_fns.web_reader import WebTextExtractor, WebExtractorConfig
-    from toolbox import update_ui
 
     extractor = WebTextExtractor(WebExtractorConfig())
     try:
@@ -2738,7 +2900,6 @@ def contain_uploaded_files(inputs: str):
 
 def load_uploaded_files(inputs, method, llm_kwargs, plugin_kwargs, chatbot_with_cookie, history, system_prompt, stream, additional_fn):
     # load file
-    from crazy_functions.doc_fns.text_content_loader import TextContentLoader
     file_path = extract_file_path(inputs)
     loader = TextContentLoader(chatbot_with_cookie, history)
     yield from loader.execute(file_path)
@@ -2873,7 +3034,6 @@ def predict_no_ui_long_connection(inputs:str, llm_kwargs:dict, history:list=[], 
     observe_window = None：
         用于负责跨越线程传递已经输出的部分，大部分时候仅仅为了fancy的视觉效果，留空即可。observe_window[0]：观测窗。observe_window[1]：看门狗
     """
-    from request_llms.bridge_all import model_info
 
     watch_dog_patience = 5 # 看门狗的耐心, 设置5秒即可
 
@@ -2956,7 +3116,6 @@ def predict(inputs:str, llm_kwargs:dict, plugin_kwargs:dict, chatbot:ChatBotWith
     chatbot 为WebUI中显示的对话列表，修改它，然后yield出去，可以直接修改对话界面内容
     additional_fn代表点击的哪个按钮，按钮见functional.py
     """
-    from request_llms.bridge_all import model_info
     if is_any_api_key(inputs):
         chatbot._cookies['api_key'] = inputs
         chatbot.append(("输入已识别为openai的api_key", what_keys(inputs)))
@@ -2969,7 +3128,6 @@ def predict(inputs:str, llm_kwargs:dict, plugin_kwargs:dict, chatbot:ChatBotWith
 
     user_input = inputs
     if additional_fn is not None:
-        from core_functional import handle_core_functionality
         inputs, history = handle_core_functionality(additional_fn, inputs, history, chatbot)
 
     # 多模态模型
@@ -3115,7 +3273,6 @@ def handle_o1_model_special(response, inputs, llm_kwargs, chatbot, history):
         yield from update_ui(chatbot=chatbot, history=history, msg="Json解析异常" + response.text) # 刷新界面
 
 def handle_error(inputs, llm_kwargs, chatbot, history, chunk_decoded, error_msg):
-    from request_llms.bridge_all import model_info
     openai_website = ' 请登录OpenAI查看详情 https://platform.openai.com/signup'
     if "reduce the length" in error_msg:
         if len(history) >= 2: history[-1] = ""; history[-2] = "" # 清除当前溢出的输入：history[-2] 是本次输入, history[-1] 是本次输出
@@ -3139,7 +3296,6 @@ def handle_error(inputs, llm_kwargs, chatbot, history, chunk_decoded, error_msg)
     elif "Not enough point" in error_msg:
         chatbot[-1] = (chatbot[-1][0], "[Local Message] Not enough point. API2D账户点数不足.")
     else:
-        from toolbox import regular_txt_to_markdown
         tb_str = '```\n' + trimmed_format_exc() + '```'
         chatbot[-1] = (chatbot[-1][0], f"[Local Message] 异常 \n\n{tb_str} \n\n{regular_txt_to_markdown(chunk_decoded)}")
     return chatbot, history
@@ -3148,7 +3304,6 @@ def generate_payload(inputs:str, llm_kwargs:dict, history:list, system_prompt:st
     """
     整合所有信息，选择LLM模型，生成http请求，为发送请求做准备
     """
-    from request_llms.bridge_all import model_info
 
     if not is_any_api_key(llm_kwargs['api_key']):
         raise AssertionError("你提供了错误的API_KEY。\n\n1. 临时解决方案：直接在输入区键入api_key，然后回车提交。\n\n2. 长效解决方案：在config.py中配置。")
@@ -3326,8 +3481,6 @@ def input_clipping(inputs, history, max_token_limit, return_clip_flags=False):
         - inputs 本次请求（经过clip）
         - history 历史上下文（经过clip）
     """
-    import numpy as np
-    from request_llms.bridge_all import model_info
     enc = model_info["gpt-3.5-turbo"]['tokenizer']
     def get_token_num(txt): return len(enc.encode(txt, disallowed_special=()))
 
@@ -3400,9 +3553,6 @@ def request_gpt_model_in_new_thread_with_ui_alive(
     输出 Returns:
         future: 输出，GPT返回的结果
     """
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-    from request_llms.bridge_all import predict_no_ui_long_connection
     # 用户反馈
     chatbot.append([inputs_show_user, ""])
     yield from update_ui(chatbot=chatbot, history=[]) # 刷新界面
@@ -3429,7 +3579,6 @@ def request_gpt_model_in_new_thread_with_ui_alive(
                 if handle_token_exceed:
                     exceeded_cnt += 1
                     # 【选择处理】 尝试计算比例，尽可能多地保留文本
-                    from toolbox import get_reduce_token_percent
                     p_ratio, n_exceed = get_reduce_token_percent(str(token_exceeded_error))
                     MAX_TOKEN = get_max_token(llm_kwargs)
                     EXCEED_ALLO = 512 + 512 * exceeded_cnt
@@ -3475,7 +3624,6 @@ def request_gpt_model_in_new_thread_with_ui_alive(
     return final_result
 
 def can_multi_process(llm) -> bool:
-    from request_llms.bridge_all import model_info
 
     def default_condition(llm) -> bool:
         # legacy condition
@@ -3529,9 +3677,6 @@ def request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
     输出 Returns:
         list: List of GPT model responses （每个子任务的输出汇总，如果某个子任务出错，response中会携带traceback报错信息，方便调试和定位问题。）
     """
-    import time, random
-    from concurrent.futures import ThreadPoolExecutor
-    from request_llms.bridge_all import predict_no_ui_long_connection
     assert len(inputs_array) == len(history_array)
     assert len(inputs_array) == len(sys_prompt_array)
     if max_workers == -1: # 读取配置文件
@@ -3576,7 +3721,6 @@ def request_gpt_model_multi_threads_with_very_awesome_ui_and_high_efficiency(
                 if handle_token_exceed:
                     exceeded_cnt += 1
                     # 【选择处理】 尝试计算比例，尽可能多地保留文本
-                    from toolbox import get_reduce_token_percent
                     p_ratio, n_exceed = get_reduce_token_percent(str(token_exceeded_error))
                     MAX_TOKEN = get_max_token(llm_kwargs)
                     EXCEED_ALLO = 512 + 512 * exceeded_cnt
@@ -3686,9 +3830,6 @@ def read_and_clean_pdf_text(fp):
     - 清除重复的换行
     - 将每个换行符替换为两个换行符，使每个段落之间有两个换行符分隔
     """
-    import fitz, copy
-    import re
-    import numpy as np
     # from shared_utils.colorful import print亮黄, print亮绿
     fc = 0  # Index 0 文本
     fs = 1  # Index 1 字体
@@ -3862,14 +4003,10 @@ def get_files_from_everything(txt, type): # type='.md'
     - project_folder: 字符串，表示文件所在的文件夹路径。如果是网络上的文件，就是临时文件夹的路径。
     该函数详细注释已添加，请确认是否满足您的需要。
     """
-    import glob, os
 
     success = True
     if txt.startswith('http'):
         # 网络的远程文件
-        import requests
-        from toolbox import get_conf
-        from toolbox import get_log_folder, gen_time_str
         proxies = get_conf('proxies')
         try:
             r = requests.get(txt, proxies=proxies)
@@ -3903,8 +4040,6 @@ class nougat_interface():
         self.threadLock = threading.Lock()
 
     def nougat_with_timeout(self, command, cwd, timeout=3600):
-        import subprocess
-        from toolbox import ProxyNetworkActivate
         logger.info(f'正在执行命令 {command}')
         with ProxyNetworkActivate("Nougat_Download"):
             process = subprocess.Popen(command, shell=False, cwd=cwd, env=os.environ)
@@ -3919,13 +4054,10 @@ class nougat_interface():
 
 
     def NOUGAT_parse_pdf(self, fp, chatbot, history):
-        from toolbox import update_ui_latest_msg
 
         yield from update_ui_latest_msg("正在解析论文, 请稍候。进度：正在排队, 等待线程锁...",
                                          chatbot=chatbot, history=history, delay=0)
         self.threadLock.acquire()
-        import glob, threading, os
-        from toolbox import get_log_folder, gen_time_str
         dst = os.path.join(get_log_folder(plugin_name='nougat'), gen_time_str())
         os.makedirs(dst)
 
@@ -3942,10 +4074,8 @@ class nougat_interface():
 
 
 def try_install_deps(deps, reload_m=[]):
-    import subprocess, sys, importlib
     for dep in deps:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', dep])
-    import site
     importlib.reload(site)
     for m in reload_m:
         importlib.reload(__import__(m))
@@ -3990,7 +4120,6 @@ class MoonShotInit:
                 for file in files:
                     if file.split('.')[-1] in ['pdf']:
                         with open(file, 'r', encoding='utf8') as fp:
-                            from crazy_functions.crazy_utils import read_and_clean_pdf_text
                             file_content, _ = read_and_clean_pdf_text(fp)
                         what_ask.append({"role": "system", "content": file_content})
         return what_ask
@@ -4109,7 +4238,6 @@ def predict(inputs:str, llm_kwargs:dict, plugin_kwargs:dict, chatbot:ChatBotWith
     chatbot.append([inputs, ""])
 
     if additional_fn is not None:
-        from core_functional import handle_core_functionality
         inputs, history = handle_core_functionality(additional_fn, inputs, history, chatbot)
     yield from update_ui(chatbot=chatbot, history=history, msg="等待响应")  # 刷新界面
     gpt_bro_init = MoonShotInit()
@@ -4793,8 +4921,8 @@ for model in AVAIL_LLM_MODELS:
 # claude家族
 claude_models = ["claude-instant-1.2","claude-2.0","claude-2.1","claude-3-haiku-20240307","claude-3-sonnet-20240229","claude-3-opus-20240229","claude-3-5-sonnet-20240620"]
 if any(item in claude_models for item in AVAIL_LLM_MODELS):
-    from .bridge_claude import predict_no_ui_long_connection as claude_noui
-    from .bridge_claude import predict as claude_ui
+#     from .bridge_claude import predict_no_ui_long_connection as claude_noui  # Relative import removed
+#     from .bridge_claude import predict as claude_ui  # Relative import removed
     model_info.update({
         "claude-instant-1.2": {
             "fn_with_ui": claude_ui,
@@ -4866,8 +4994,8 @@ if any(item in claude_models for item in AVAIL_LLM_MODELS):
         },
     })
 if "jittorllms_rwkv" in AVAIL_LLM_MODELS:
-    from .bridge_jittorllms_rwkv import predict_no_ui_long_connection as rwkv_noui
-    from .bridge_jittorllms_rwkv import predict as rwkv_ui
+#     from .bridge_jittorllms_rwkv import predict_no_ui_long_connection as rwkv_noui  # Relative import removed
+#     from .bridge_jittorllms_rwkv import predict as rwkv_ui  # Relative import removed
     model_info.update({
         "jittorllms_rwkv": {
             "fn_with_ui": rwkv_ui,
@@ -4879,8 +5007,8 @@ if "jittorllms_rwkv" in AVAIL_LLM_MODELS:
         },
     })
 if "jittorllms_llama" in AVAIL_LLM_MODELS:
-    from .bridge_jittorllms_llama import predict_no_ui_long_connection as llama_noui
-    from .bridge_jittorllms_llama import predict as llama_ui
+#     from .bridge_jittorllms_llama import predict_no_ui_long_connection as llama_noui  # Relative import removed
+#     from .bridge_jittorllms_llama import predict as llama_ui  # Relative import removed
     model_info.update({
         "jittorllms_llama": {
             "fn_with_ui": llama_ui,
@@ -4892,8 +5020,8 @@ if "jittorllms_llama" in AVAIL_LLM_MODELS:
         },
     })
 if "jittorllms_pangualpha" in AVAIL_LLM_MODELS:
-    from .bridge_jittorllms_pangualpha import predict_no_ui_long_connection as pangualpha_noui
-    from .bridge_jittorllms_pangualpha import predict as pangualpha_ui
+#     from .bridge_jittorllms_pangualpha import predict_no_ui_long_connection as pangualpha_noui  # Relative import removed
+#     from .bridge_jittorllms_pangualpha import predict as pangualpha_ui  # Relative import removed
     model_info.update({
         "jittorllms_pangualpha": {
             "fn_with_ui": pangualpha_ui,
@@ -4905,8 +5033,8 @@ if "jittorllms_pangualpha" in AVAIL_LLM_MODELS:
         },
     })
 if "moss" in AVAIL_LLM_MODELS:
-    from .bridge_moss import predict_no_ui_long_connection as moss_noui
-    from .bridge_moss import predict as moss_ui
+#     from .bridge_moss import predict_no_ui_long_connection as moss_noui  # Relative import removed
+#     from .bridge_moss import predict as moss_ui  # Relative import removed
     model_info.update({
         "moss": {
             "fn_with_ui": moss_ui,
@@ -4918,8 +5046,8 @@ if "moss" in AVAIL_LLM_MODELS:
         },
     })
 if "stack-claude" in AVAIL_LLM_MODELS:
-    from .bridge_stackclaude import predict_no_ui_long_connection as claude_noui
-    from .bridge_stackclaude import predict as claude_ui
+#     from .bridge_stackclaude import predict_no_ui_long_connection as claude_noui  # Relative import removed
+#     from .bridge_stackclaude import predict as claude_ui  # Relative import removed
     model_info.update({
         "stack-claude": {
             "fn_with_ui": claude_ui,
@@ -4932,8 +5060,8 @@ if "stack-claude" in AVAIL_LLM_MODELS:
     })
 if "newbing" in AVAIL_LLM_MODELS:   # same with newbing-free
     try:
-        from .bridge_newbingfree import predict_no_ui_long_connection as newbingfree_noui
-        from .bridge_newbingfree import predict as newbingfree_ui
+#         from .bridge_newbingfree import predict_no_ui_long_connection as newbingfree_noui  # Relative import removed
+#         from .bridge_newbingfree import predict as newbingfree_ui  # Relative import removed
         model_info.update({
             "newbing": {
                 "fn_with_ui": newbingfree_ui,
@@ -4948,8 +5076,8 @@ if "newbing" in AVAIL_LLM_MODELS:   # same with newbing-free
         logger.error(trimmed_format_exc())
 if "chatglmft" in AVAIL_LLM_MODELS:   # same with newbing-free
     try:
-        from .bridge_chatglmft import predict_no_ui_long_connection as chatglmft_noui
-        from .bridge_chatglmft import predict as chatglmft_ui
+#         from .bridge_chatglmft import predict_no_ui_long_connection as chatglmft_noui  # Relative import removed
+#         from .bridge_chatglmft import predict as chatglmft_ui  # Relative import removed
         model_info.update({
             "chatglmft": {
                 "fn_with_ui": chatglmft_ui,
@@ -4965,8 +5093,8 @@ if "chatglmft" in AVAIL_LLM_MODELS:   # same with newbing-free
 # -=-=-=-=-=-=- 上海AI-LAB书生大模型 -=-=-=-=-=-=-
 if "internlm" in AVAIL_LLM_MODELS:
     try:
-        from .bridge_internlm import predict_no_ui_long_connection as internlm_noui
-        from .bridge_internlm import predict as internlm_ui
+#         from .bridge_internlm import predict_no_ui_long_connection as internlm_noui  # Relative import removed
+#         from .bridge_internlm import predict as internlm_ui  # Relative import removed
         model_info.update({
             "internlm": {
                 "fn_with_ui": internlm_ui,
@@ -4981,8 +5109,8 @@ if "internlm" in AVAIL_LLM_MODELS:
         logger.error(trimmed_format_exc())
 if "chatglm_onnx" in AVAIL_LLM_MODELS:
     try:
-        from .bridge_chatglmonnx import predict_no_ui_long_connection as chatglm_onnx_noui
-        from .bridge_chatglmonnx import predict as chatglm_onnx_ui
+#         from .bridge_chatglmonnx import predict_no_ui_long_connection as chatglm_onnx_noui  # Relative import removed
+#         from .bridge_chatglmonnx import predict as chatglm_onnx_ui  # Relative import removed
         model_info.update({
             "chatglm_onnx": {
                 "fn_with_ui": chatglm_onnx_ui,
@@ -4998,8 +5126,8 @@ if "chatglm_onnx" in AVAIL_LLM_MODELS:
 # -=-=-=-=-=-=- 通义-本地模型 -=-=-=-=-=-=-
 if "qwen-local" in AVAIL_LLM_MODELS:
     try:
-        from .bridge_qwen_local import predict_no_ui_long_connection as qwen_local_noui
-        from .bridge_qwen_local import predict as qwen_local_ui
+#         from .bridge_qwen_local import predict_no_ui_long_connection as qwen_local_noui  # Relative import removed
+#         from .bridge_qwen_local import predict as qwen_local_ui  # Relative import removed
         model_info.update({
             "qwen-local": {
                 "fn_with_ui": qwen_local_ui,
@@ -5021,8 +5149,8 @@ qwen_models = ["qwen-max-latest", "qwen-max-2025-01-25","qwen-max","qwen-turbo",
                ]
 if any(item in qwen_models for item in AVAIL_LLM_MODELS):
     try:
-        from .bridge_qwen import predict_no_ui_long_connection as qwen_noui
-        from .bridge_qwen import predict as qwen_ui
+#         from .bridge_qwen import predict_no_ui_long_connection as qwen_noui  # Relative import removed
+#         from .bridge_qwen import predict as qwen_ui  # Relative import removed
         model_info.update({
             "qwen-turbo": {
                 "fn_with_ui": qwen_ui,
@@ -5228,8 +5356,8 @@ if any(item in grok_models for item in AVAIL_LLM_MODELS):
 # -=-=-=-=-=-=- 讯飞星火认知大模型 -=-=-=-=-=-=-
 if "spark" in AVAIL_LLM_MODELS:
     try:
-        from .bridge_spark import predict_no_ui_long_connection as spark_noui
-        from .bridge_spark import predict as spark_ui
+#         from .bridge_spark import predict_no_ui_long_connection as spark_noui  # Relative import removed
+#         from .bridge_spark import predict as spark_ui  # Relative import removed
         model_info.update({
             "spark": {
                 "fn_with_ui": spark_ui,
@@ -5245,8 +5373,8 @@ if "spark" in AVAIL_LLM_MODELS:
         logger.error(trimmed_format_exc())
 if "sparkv2" in AVAIL_LLM_MODELS:   # 讯飞星火认知大模型
     try:
-        from .bridge_spark import predict_no_ui_long_connection as spark_noui
-        from .bridge_spark import predict as spark_ui
+#         from .bridge_spark import predict_no_ui_long_connection as spark_noui  # Relative import removed
+#         from .bridge_spark import predict as spark_ui  # Relative import removed
         model_info.update({
             "sparkv2": {
                 "fn_with_ui": spark_ui,
@@ -5262,8 +5390,8 @@ if "sparkv2" in AVAIL_LLM_MODELS:   # 讯飞星火认知大模型
         logger.error(trimmed_format_exc())
 if any(x in AVAIL_LLM_MODELS for x in ("sparkv3", "sparkv3.5", "sparkv4")):   # 讯飞星火认知大模型
     try:
-        from .bridge_spark import predict_no_ui_long_connection as spark_noui
-        from .bridge_spark import predict as spark_ui
+#         from .bridge_spark import predict_no_ui_long_connection as spark_noui  # Relative import removed
+#         from .bridge_spark import predict as spark_ui  # Relative import removed
         model_info.update({
             "sparkv3": {
                 "fn_with_ui": spark_ui,
@@ -5297,8 +5425,8 @@ if any(x in AVAIL_LLM_MODELS for x in ("sparkv3", "sparkv3.5", "sparkv4")):   # 
         logger.error(trimmed_format_exc())
 if "llama2" in AVAIL_LLM_MODELS:   # llama2
     try:
-        from .bridge_llama2 import predict_no_ui_long_connection as llama2_noui
-        from .bridge_llama2 import predict as llama2_ui
+#         from .bridge_llama2 import predict_no_ui_long_connection as llama2_noui  # Relative import removed
+#         from .bridge_llama2 import predict as llama2_ui  # Relative import removed
         model_info.update({
             "llama2": {
                 "fn_with_ui": llama2_ui,
@@ -5329,8 +5457,8 @@ if "zhipuai" in AVAIL_LLM_MODELS:   # zhipuai 是glm-4的别名，向后兼容�
 # -=-=-=-=-=-=- 幻方-深度求索本地大模型 -=-=-=-=-=-=-
 if "deepseekcoder" in AVAIL_LLM_MODELS:   # deepseekcoder
     try:
-        from .bridge_deepseekcoder import predict_no_ui_long_connection as deepseekcoder_noui
-        from .bridge_deepseekcoder import predict as deepseekcoder_ui
+#         from .bridge_deepseekcoder import predict_no_ui_long_connection as deepseekcoder_noui  # Relative import removed
+#         from .bridge_deepseekcoder import predict as deepseekcoder_ui  # Relative import removed
         model_info.update({
             "deepseekcoder": {
                 "fn_with_ui": deepseekcoder_ui,
@@ -5495,8 +5623,8 @@ for model in [m for m in AVAIL_LLM_MODELS if m.startswith("vllm-")]:
     })
 # -=-=-=-=-=-=- ollama 对齐支持 -=-=-=-=-=-=-
 for model in [m for m in AVAIL_LLM_MODELS if m.startswith("ollama-")]:
-    from .bridge_ollama import predict_no_ui_long_connection as ollama_noui
-    from .bridge_ollama import predict as ollama_ui
+#     from .bridge_ollama import predict_no_ui_long_connection as ollama_noui  # Relative import removed
+#     from .bridge_ollama import predict as ollama_ui  # Relative import removed
     break
 for model in [m for m in AVAIL_LLM_MODELS if m.startswith("ollama-")]:
     # 为了更灵活地接入ollama多模型管理界面，设计了此接口，例子：AVAIL_LLM_MODELS = ["ollama-phi3(max_token=6666)"]
@@ -5546,8 +5674,6 @@ if len(AZURE_CFG_ARRAY) > 0:
 # -=-=-=-=-=-=- Openrouter模型对齐支持 -=-=-=-=-=-=-
 # 为了更灵活地接入Openrouter路由，设计了此接口
 for model in [m for m in AVAIL_LLM_MODELS if m.startswith("openrouter-")]:
-    from request_llms.bridge_openrouter import predict_no_ui_long_connection as openrouter_noui
-    from request_llms.bridge_openrouter import predict as openrouter_ui
     model_info.update({
         model: {
             "fn_with_ui": openrouter_ui,
@@ -5599,7 +5725,6 @@ def predict_no_ui_long_connection(inputs:str, llm_kwargs:dict, history:list, sys
     observe_window = None：
         用于负责跨越线程传递已经输出的部分，大部分时候仅仅为了fancy的视觉效果，留空即可。observe_window[0]：观测窗。observe_window[1]：看门狗
     """
-    import threading, time, copy
 
     inputs = apply_gpt_academic_string_mask(inputs, mode="show_llm")
     model = llm_kwargs['llm_model']
@@ -5701,7 +5826,6 @@ def predict(inputs:str, llm_kwargs:dict, plugin_kwargs:dict, chatbot,
     inputs = apply_gpt_academic_string_mask(inputs, mode="show_llm")
 
     if llm_kwargs['llm_model'] not in model_info:
-        from toolbox import update_ui
         chatbot.append([inputs, f"很抱歉，模型 '{llm_kwargs['llm_model']}' 暂不支持<br/>(1) 检查config中的AVAIL_LLM_MODELS选项<br/>(2) 检查request_llms/bridge_all.py中的模型路由"])
         yield from update_ui(chatbot=chatbot, history=history) # 刷新界面
 
@@ -5734,7 +5858,6 @@ def get_plugin_handle(plugin_name):
     """
     e.g. plugin_name = 'crazy_functions.Markdown_Translate->Markdown翻译指定语言'
     """
-    import importlib
 
     assert (
         "->" in plugin_name
@@ -5748,7 +5871,6 @@ def get_chat_handle():
     """
     Get chat function
     """
-    from request_llms.bridge_all import predict_no_ui_long_connection
 
     return predict_no_ui_long_connection
 
@@ -5757,7 +5879,6 @@ def get_plugin_default_kwargs():
     """
     Get Plugin Default Arguments
     """
-    from toolbox import ChatBotWithCookies, load_chat_cookies
 
     cookies = load_chat_cookies()
     llm_kwargs = {
@@ -5786,7 +5907,6 @@ def get_chat_default_kwargs():
     """
     Get Chat Default Arguments
     """
-    from toolbox import load_chat_cookies
 
     cookies = load_chat_cookies()
     llm_kwargs = {
@@ -5819,7 +5939,6 @@ def get_token_num(txt, tokenizer):
     return len(tokenizer.encode(txt, disallowed_special=()))
 
 def get_model_info():
-    from request_llms.bridge_all import model_info
     return model_info
 
 def clip_history(inputs, history, tokenizer, max_token_limit):
@@ -5834,7 +5953,6 @@ def clip_history(inputs, history, tokenizer, max_token_limit):
 
     被动触发裁剪
     """
-    import numpy as np
 
     input_token_num = get_token_num(inputs)
 
@@ -6276,7 +6394,6 @@ def update_ui_latest_msg(lastmsg:str, chatbot:ChatBotWithCookies, history:list, 
 
 
 def trimmed_format_exc():
-    import os, traceback
 
     str = traceback.format_exc()
     current_path = os.getcwd()
@@ -6391,8 +6508,6 @@ def write_history_to_file(
     """
     将对话记录history以Markdown格式写入文件中。如果没有指定文件名，则使用当前时间生成文件名。
     """
-    import os
-    import time
 
     if file_fullname is None:
         if file_basename is not None:
@@ -6442,8 +6557,6 @@ def find_free_port()->int:
     """
     返回当前系统中可用的未使用端口。
     """
-    import socket
-    from contextlib import closing
 
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.bind(("", 0))
@@ -6455,8 +6568,6 @@ def find_recent_files(directory:str)->List[str]:
     """
     Find files that is created with in one minutes under a directory with python, write a function
     """
-    import os
-    import time
 
     current_time = time.time()
     one_minute_ago = current_time - 60
@@ -6490,7 +6601,6 @@ def file_already_in_downloadzone(file:str, user_path:str):
 
 def promote_file_to_downloadzone(file:str, rename_file:str=None, chatbot:ChatBotWithCookies=None):
     # 将文件复制一份到下载区
-    import shutil
 
     if chatbot is not None:
         user_name = get_user(chatbot)
@@ -6777,9 +6887,6 @@ def run_gradio_in_subpath(demo, auth, port, custom_path):
 
     if not is_path_legal(custom_path):
         raise RuntimeError("Illegal custom path")
-    import uvicorn
-    import gradio as gr
-    from fastapi import FastAPI
 
     app = FastAPI()
     if custom_path != "/":
@@ -6813,8 +6920,6 @@ def auto_context_clip(current, history, policy='search_optimal'):
 
 
 def zip_folder(source_folder, dest_folder, zip_name):
-    import zipfile
-    import os
 
     # Make sure the source folder exists
     if not os.path.exists(source_folder):
@@ -6852,7 +6957,6 @@ def zip_result(folder):
 
 
 def gen_time_str():
-    import time
 
     return time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
 
@@ -6907,7 +7011,6 @@ class ProxyNetworkActivate:
             self.valid = True
         else:
             # 给定了task, 我们检查一下
-            from toolbox import get_conf
 
             WHEN_TO_USE_PROXY = get_conf("WHEN_TO_USE_PROXY")
             self.valid = task in WHEN_TO_USE_PROXY
@@ -6915,7 +7018,6 @@ class ProxyNetworkActivate:
     def __enter__(self):
         if not self.valid:
             return self
-        from toolbox import get_conf
 
         proxies = get_conf("proxies")
         if "no_proxy" in os.environ:
@@ -6997,13 +7099,11 @@ def encode_image(image_path):
 
 
 def get_max_token(llm_kwargs):
-    from request_llms.bridge_all import model_info
 
     return model_info[llm_kwargs["llm_model"]]["max_token"]
 
 
 def check_packages(packages=[]):
-    import importlib.util
 
     for p in packages:
         spam_spec = importlib.util.find_spec(p)
@@ -7012,7 +7112,6 @@ def check_packages(packages=[]):
 
 
 def map_file_to_sha256(file_path):
-    import hashlib
 
     with open(file_path, 'rb') as file:
         content = file.read()
@@ -7027,8 +7126,6 @@ def check_repeat_upload(new_pdf_path, pdf_hash):
     '''
     检查历史上传的文件是否与新上传的文件相同，如果相同则返回(True, 重复文件路径)，否则返回(False，None)
     '''
-    from toolbox import get_conf
-    import PyPDF2
 
     user_upload_dir = os.path.dirname(os.path.dirname(new_pdf_path))
     file_name = os.path.basename(new_pdf_path)
@@ -7085,190 +7182,12 @@ def log_chat(llm_model: str, input_str: str, output_str: str):
 
 
 # ----------------------------------------------------------------------
-# MODULE: core_functional
-# SOURCE: core_functional.py
-# ----------------------------------------------------------------------
-
-# 'primary' 颜色对应 theme.py 中的 primary_hue
-# 'secondary' 颜色对应 theme.py 中的 neutral_hue
-# 'stop' 颜色对应 theme.py 中的 color_er
-
-def get_core_functions():
-    return {
-
-        "学术语料润色": {
-            # [1*] 前缀字符串，会被加在你的输入之前。例如，用来描述你的要求，例如翻译、解释代码、润色等等。
-            #      这里填一个提示词字符串就行了，这里为了区分中英文情景搞复杂了一点
-            "Prefix":   build_gpt_academic_masked_string_langbased(
-                            text_show_english=
-                                r"Below is a paragraph from an academic paper. Polish the writing to meet the academic style, "
-                                r"improve the spelling, grammar, clarity, concision and overall readability. When necessary, rewrite the whole sentence. "
-                                r"Firstly, you should provide the polished paragraph (in English). "
-                                r"Secondly, you should list all your modification and explain the reasons to do so in markdown table.",
-                            text_show_chinese=
-                                r"作为一名中文学术论文写作改进助理，你的任务是改进所提供文本的拼写、语法、清晰、简洁和整体可读性，"
-                                r"同时分解长句，减少重复，并提供改进建议。请先提供文本的更正版本，然后在markdown表格中列出修改的内容，并给出修改的理由:"
-                        ) + "\n\n",
-            # [2*] 后缀字符串，会被加在你的输入之后。例如，配合前缀可以把你的输入内容用引号圈起来
-            "Suffix":   r"",
-            # [3] 按钮颜色 (可选参数，默认 secondary)
-            "Color":    r"secondary",
-            # [4] 按钮是否可见 (可选参数，默认 True，即可见)
-            "Visible": True,
-            # [5] 是否在触发时清除历史 (可选参数，默认 False，即不处理之前的对话历史)
-            "AutoClearHistory": False,
-            # [6] 文本预处理 （可选参数，默认 None，举例：写个函数移除所有的换行符）
-            "PreProcess": None,
-            # [7] 模型选择 （可选参数。如不设置，则使用当前全局模型；如设置，则用指定模型覆盖全局模型。）
-            # "ModelOverride": "gpt-3.5-turbo", # 主要用途：强制点击此基础功能按钮时，使用指定的模型。
-        },
-
-
-        "总结绘制脑图": {
-            # 前缀，会被加在你的输入之前。例如，用来描述你的要求，例如翻译、解释代码、润色等等
-            "Prefix":   '''"""\n\n''',
-            # 后缀，会被加在你的输入之后。例如，配合前缀可以把你的输入内容用引号圈起来
-            "Suffix":
-                # dedent() 函数用于去除多行字符串的缩进
-                dedent("\n\n"+r'''
-                    """
-
-                    使用mermaid flowchart对以上文本进行总结，概括上述段落的内容以及内在逻辑关系，例如：
-
-                    以下是对以上文本的总结，以mermaid flowchart的形式展示：
-                    ```mermaid
-                    flowchart LR
-                        A["节点名1"] --> B("节点名2")
-                        B --> C{"节点名3"}
-                        C --> D["节点名4"]
-                        C --> |"箭头名1"| E["节点名5"]
-                        C --> |"箭头名2"| F["节点名6"]
-                    ```
-
-                    注意：
-                    （1）使用中文
-                    （2）节点名字使用引号包裹，如["Laptop"]
-                    （3）`|` 和 `"`之间不要存在空格
-                    （4）根据情况选择flowchart LR（从左到右）或者flowchart TD（从上到下）
-                '''),
-        },
-
-
-        "查找语法错误": {
-            "Prefix":   r"Help me ensure that the grammar and the spelling is correct. "
-                        r"Do not try to polish the text, if no mistake is found, tell me that this paragraph is good. "
-                        r"If you find grammar or spelling mistakes, please list mistakes you find in a two-column markdown table, "
-                        r"put the original text the first column, "
-                        r"put the corrected text in the second column and highlight the key words you fixed. "
-                        r"Finally, please provide the proofreaded text.""\n\n"
-                        r"Example:""\n"
-                        r"Paragraph: How is you? Do you knows what is it?""\n"
-                        r"| Original sentence | Corrected sentence |""\n"
-                        r"| :--- | :--- |""\n"
-                        r"| How **is** you? | How **are** you? |""\n"
-                        r"| Do you **knows** what **is** **it**? | Do you **know** what **it** **is** ? |""\n\n"
-                        r"Below is a paragraph from an academic paper. "
-                        r"You need to report all grammar and spelling mistakes as the example before."
-                        + "\n\n",
-            "Suffix":   r"",
-            "PreProcess": clear_line_break,    # 预处理：清除换行符
-        },
-
-
-        "中译英": {
-            "Prefix":   r"Please translate following sentence to English:" + "\n\n",
-            "Suffix":   r"",
-        },
-
-
-        "学术英中互译": {
-            "Prefix":   build_gpt_academic_masked_string_langbased(
-                            text_show_chinese=
-                                r"I want you to act as a scientific English-Chinese translator, "
-                                r"I will provide you with some paragraphs in one language "
-                                r"and your task is to accurately and academically translate the paragraphs only into the other language. "
-                                r"Do not repeat the original provided paragraphs after translation. "
-                                r"You should use artificial intelligence tools, "
-                                r"such as natural language processing, and rhetorical knowledge "
-                                r"and experience about effective writing techniques to reply. "
-                                r"I'll give you my paragraphs as follows, tell me what language it is written in, and then translate:",
-                            text_show_english=
-                                r"你是经验丰富的翻译，请把以下学术文章段落翻译成中文，"
-                                r"并同时充分考虑中文的语法、清晰、简洁和整体可读性，"
-                                r"必要时，你可以修改整个句子的顺序以确保翻译后的段落符合中文的语言习惯。"
-                                r"你需要翻译的文本如下："
-                        ) + "\n\n",
-            "Suffix":   r"",
-        },
-
-
-        "英译中": {
-            "Prefix":   r"翻译成地道的中文：" + "\n\n",
-            "Suffix":   r"",
-            "Visible":  False,
-        },
-
-
-        "找图片": {
-            "Prefix":   r"我需要你找一张网络图片。使用Unsplash API(https://source.unsplash.com/960x640/?<英语关键词>)获取图片URL，"
-                        r"然后请使用Markdown格式封装，并且不要有反斜线，不要用代码块。现在，请按以下描述给我发送图片：" + "\n\n",
-            "Suffix":   r"",
-            "Visible":  False,
-        },
-
-
-        "解释代码": {
-            "Prefix":   r"请解释以下代码：" + "\n```\n",
-            "Suffix":   "\n```\n",
-        },
-
-
-        "参考文献转Bib": {
-            "Prefix":   r"Here are some bibliography items, please transform them into bibtex style."
-                        r"Note that, reference styles maybe more than one kind, you should transform each item correctly."
-                        r"Items need to be transformed:" + "\n\n",
-            "Visible":  False,
-            "Suffix":   r"",
-        }
-    }
-
-
-def handle_core_functionality(additional_fn, inputs, history, chatbot):
-    import core_functional
-    importlib.reload(core_functional)    # 热更新prompt
-    core_functional = core_functional.get_core_functions()
-    addition = chatbot._cookies['customize_fn_overwrite']
-    if additional_fn in addition:
-        # 自定义功能
-        inputs = addition[additional_fn]["Prefix"] + inputs + addition[additional_fn]["Suffix"]
-        return inputs, history
-    else:
-        # 预制功能
-        if "PreProcess" in core_functional[additional_fn]:
-            if core_functional[additional_fn]["PreProcess"] is not None:
-                inputs = core_functional[additional_fn]["PreProcess"](inputs)  # 获取预处理函数（如果有的话）
-        # 为字符串加上上面定义的前缀和后缀。
-        inputs = apply_gpt_academic_string_mask_langbased(
-            string = core_functional[additional_fn]["Prefix"] + inputs + core_functional[additional_fn]["Suffix"],
-            lang_reference = inputs,
-        )
-        if core_functional[additional_fn].get("AutoClearHistory", False):
-            history = []
-        return inputs, history
-
-if __name__ == "__main__":
-    t = get_core_functions()["总结绘制脑图"]
-    print(t["Prefix"] + t["Suffix"])
-
-
-# ----------------------------------------------------------------------
 # MODULE: crazy_functions.gen_fns.gen_fns_shared
 # SOURCE: crazy_functions/gen_fns/gen_fns_shared.py
 # ----------------------------------------------------------------------
 
 
 def get_class_name(class_string):
-    import re
     # Use regex to extract the class name
     class_name = re.search(r'class (\w+)\(', class_string).group(1)
     return class_name
@@ -7372,7 +7291,6 @@ def inspect_dependency(chatbot, history):
     return True
 
 def get_code_block(reply):
-    import re
     pattern = r"```([\s\S]*?)```" # regex pattern to match code blocks
     matches = re.findall(pattern, reply) # find all code blocks in text
     if len(matches) == 1:
